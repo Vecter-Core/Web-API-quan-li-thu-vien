@@ -1,0 +1,46 @@
+{
+	"folders": [
+		{
+			"path": ".next"
+		},
+		{
+			"path": "agile_v_skills"
+		},
+		{
+			"path": "app"
+		},
+		{
+			"path": "components"
+		},
+		{
+			"path": "constants"
+		},
+		{
+			"path": "database"
+		},
+		{
+			"path": "docs"
+		},
+		{
+			"path": "hooks"
+		},
+		{
+			"path": "lib"
+		},
+		{
+			"path": "migrations"
+		},
+		{
+			"path": "node_modules"
+		},
+		{
+			"path": "public"
+		},
+		{
+			"path": "scripts"
+		},
+		{
+			"path": "styles"
+		}
+	]
+}

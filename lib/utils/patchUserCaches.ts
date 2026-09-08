@@ -1,0 +1,362 @@
+/**
+ * Thin densify for user.write — user detail + pending list + all-users rows.
+ * Leaving PENDING marks densify-empty when the queue becomes [] (soft-nav guard).
+ * Re-request (REJECTED→PENDING) upserts pending queue when detail is cached.
+ * Sidebar: absolute sync pendingSignUps + users (books-style) from densified caches.
+ */
+
+import type { QueryClient } from "@tanstack/react-query";
+import { queryKeys } from "@/lib/query/keys";
+import type { UsersListResponse } from "@/lib/services/users";
+import type {
+  SignupRequestDetail,
+  SignupRequestDecisionEntry,
+} from "@/lib/admin/signupStatusDecisions";
+import type { AdminRequestReviewer } from "@/lib/admin/adminRequestTypes";
+import {
+  clearDensifiedEmpty,
+  markDensifiedEmpty,
+} from "@/lib/utils/queryCacheLists";
+import { patchAdminNavCounts } from "@/lib/utils/patchAdminNavCounts";
+import {
+  patchAdminStatsOnUserRoleChange,
+  patchAdminStatsOnUserStatusChange,
+} from "@/lib/utils/patchAdminStatsCaches";
+import { evictAnalyticsCaches } from "@/lib/utils/evictAnalyticsCaches";
+
+type UserLike = {
+  id: string;
+  status?: string;
+  role?: string;
+  [key: string]: unknown;
+};
+
+/**
+ * Re-paint signup-request detail after approve/reject so soft-nav / in-place UI
+ * does not keep PENDING KPIs or miss the new timeline row.
+ */
+export function densifySignupRequestDetail(
+  queryClient: QueryClient,
+  args: {
+    userId: string;
+    status: "APPROVED" | "REJECTED" | "PENDING";
+    decisionActor?: AdminRequestReviewer | null;
+    decidedAt?: Date | string | null;
+  },
+): void {
+  const key = queryKeys.users.signupRequestDetail(args.userId);
+  const decidedAt =
+    args.decidedAt == null
+      ? new Date()
+      : typeof args.decidedAt === "string"
+        ? new Date(args.decidedAt)
+        : args.decidedAt;
+
+  queryClient.setQueryData<SignupRequestDetail>(key, (prev) => {
+    if (!prev) return prev;
+    const next: SignupRequestDetail = {
+      ...prev,
+      status: args.status,
+    };
+    if (args.status === "APPROVED" || args.status === "REJECTED") {
+      const priorHead = prev.decisions[0];
+      // Prefer mutation actor; fall back to optimistic head so densify never flashes emptyLabel.
+      const actor =
+        args.decisionActor ??
+        (priorHead?.status === args.status ? priorHead.decisionActor : null);
+      const entry: SignupRequestDecisionEntry = {
+        id: `densify-${args.userId}-${decidedAt.getTime()}`,
+        status: args.status,
+        decidedAt,
+        decisionActor: actor,
+      };
+      const withoutBurst = prev.decisions.filter(
+        (d) => !d.id.startsWith("optimistic-") && !d.id.startsWith("densify-"),
+      );
+      next.decisions = [entry, ...withoutBurst];
+    }
+    return next;
+  });
+}
+
+/** Sync Registration Queue pill + overview pending-sign-ups badge from pending cache. */
+export function syncPendingSignUpsNav(queryClient: QueryClient): void {
+  let found = false;
+  let densest = 0;
+  for (const [, rows] of queryClient.getQueriesData<UserLike[]>({
+    queryKey: queryKeys.users.pendingRoot,
+  })) {
+    if (!Array.isArray(rows)) continue;
+    found = true;
+    densest = Math.max(densest, rows.length);
+  }
+  if (found) {
+    patchAdminNavCounts(queryClient, { pendingSignUps: densest });
+    // Absolute pendingUsers on overview when signup queue is cached (heals badge drift).
+    const stats = queryClient.getQueryData<{
+      pendingUsers?: number;
+      recentBorrows?: unknown;
+      recentUsers?: unknown;
+    }>(queryKeys.admin.stats);
+    if (
+      stats &&
+      Array.isArray(stats.recentBorrows) &&
+      Array.isArray(stats.recentUsers)
+    ) {
+      queryClient.setQueryData(queryKeys.admin.stats, {
+        ...stats,
+        pendingUsers: densest,
+      });
+    }
+  }
+}
+
+/** Sync User Management pill fallback from densest cached all-users `total`. */
+export function syncUsersNav(queryClient: QueryClient): void {
+  let found = false;
+  let densest = 0;
+  for (const [, page] of queryClient.getQueriesData<UsersListResponse>({
+    queryKey: queryKeys.users.adminRoot,
+  })) {
+    if (!page || typeof page.total !== "number") continue;
+    found = true;
+    densest = Math.max(densest, page.total);
+  }
+  if (found) {
+    patchAdminNavCounts(queryClient, { users: densest });
+  }
+}
+
+/** Patch role/status (+ optional status-reviewer) on cached all-users list rows. */
+function patchAdminUsersListRows(
+  queryClient: QueryClient,
+  patch: {
+    userId: string;
+    status?: string;
+    role?: string;
+    reviewer?: {
+      id: string;
+      fullName: string;
+      email: string;
+      universityCard: string | null;
+    } | null;
+    statusReviewedAt?: string | null;
+  },
+): void {
+  const touchesStatus = patch.status !== undefined;
+  const touchesRole = patch.role !== undefined;
+  if (!touchesStatus && !touchesRole) return;
+
+  queryClient.setQueriesData<UsersListResponse>(
+    { queryKey: queryKeys.users.adminRoot },
+    (old) => {
+      if (!old?.users) return old;
+      let changed = false;
+      const users = old.users.map((u) => {
+        if (u.id !== patch.userId) return u;
+        changed = true;
+        const next = {
+          ...u,
+          ...(touchesStatus ? { status: patch.status as typeof u.status } : {}),
+          ...(touchesRole ? { role: patch.role as typeof u.role } : {}),
+        };
+        // Approve/reject densify paints Status actor; PENDING clears it.
+        if (touchesStatus) {
+          if (patch.status === "PENDING") {
+            next.statusReviewedAt = null;
+            next.statusReviewedBy = null;
+            next.statusReviewedById = null;
+            next.statusReviewedByName = null;
+            next.statusReviewedByEmail = null;
+            next.statusReviewedByUniversityCard = null;
+          } else if (
+            patch.status === "APPROVED" ||
+            patch.status === "REJECTED"
+          ) {
+            next.statusReviewedAt =
+              patch.statusReviewedAt ?? new Date().toISOString();
+            if (patch.reviewer) {
+              next.statusReviewedBy = patch.reviewer.id;
+              next.statusReviewedById = patch.reviewer.id;
+              next.statusReviewedByName = patch.reviewer.fullName;
+              next.statusReviewedByEmail = patch.reviewer.email;
+              next.statusReviewedByUniversityCard =
+                patch.reviewer.universityCard;
+            }
+          }
+        }
+        return next;
+      });
+      return changed ? { ...old, users } : old;
+    },
+  );
+}
+
+/** Patch cached user detail after status/role change. */
+export function densifyUserWrite(
+  queryClient: QueryClient,
+  patch: {
+    userId: string;
+    status?: string;
+    role?: string;
+    /** Prior status for overview KPI delta (omit → only bump destination). */
+    fromStatus?: string | null;
+    reviewer?: {
+      id: string;
+      fullName: string;
+      email: string;
+      universityCard: string | null;
+    } | null;
+    statusReviewedAt?: string | null;
+  },
+): void {
+  if (!patch.userId) return;
+
+  // Prefer explicit fromStatus; else read detail/list before patch
+  let fromStatus = patch.fromStatus ?? null;
+  let fromRole: string | null = null;
+  const detailBefore = queryClient.getQueryData<{
+    status?: string;
+    role?: string;
+  }>(queryKeys.users.detail(patch.userId));
+  if (patch.status !== undefined && fromStatus === null) {
+    fromStatus = detailBefore?.status ?? null;
+    if (!fromStatus) {
+      for (const [, page] of queryClient.getQueriesData<UsersListResponse>({
+        queryKey: queryKeys.users.adminRoot,
+      })) {
+        const hit = page?.users?.find((u) => u.id === patch.userId);
+        if (hit?.status) {
+          fromStatus = hit.status;
+          break;
+        }
+      }
+    }
+    // Pending queue (before we drop the row) — Account Requests approve path.
+    if (!fromStatus) {
+      for (const [, rows] of queryClient.getQueriesData<UserLike[]>({
+        queryKey: queryKeys.users.pendingRoot,
+      })) {
+        if (rows?.some((u) => u.id === patch.userId)) {
+          fromStatus = "PENDING";
+          break;
+        }
+      }
+    }
+  }
+  if (patch.role !== undefined) {
+    fromRole = detailBefore?.role ?? null;
+    if (!fromRole) {
+      for (const [, page] of queryClient.getQueriesData<UsersListResponse>({
+        queryKey: queryKeys.users.adminRoot,
+      })) {
+        const hit = page?.users?.find((u) => u.id === patch.userId);
+        if (hit?.role) {
+          fromRole = hit.role;
+          break;
+        }
+      }
+    }
+  }
+
+  const key = queryKeys.users.detail(patch.userId);
+  queryClient.setQueryData(key, (prev: unknown) => {
+    if (!prev || typeof prev !== "object") return prev;
+    return {
+      ...(prev as object),
+      ...(patch.status !== undefined ? { status: patch.status } : {}),
+      ...(patch.role !== undefined ? { role: patch.role } : {}),
+    };
+  });
+
+  // Signup detail route: status (+ timeline when leaving PENDING).
+  if (
+    patch.status === "APPROVED" ||
+    patch.status === "REJECTED" ||
+    patch.status === "PENDING"
+  ) {
+    densifySignupRequestDetail(queryClient, {
+      userId: patch.userId,
+      status: patch.status,
+      decisionActor: patch.reviewer
+        ? {
+            id: patch.reviewer.id || null,
+            fullName: patch.reviewer.fullName,
+            email: patch.reviewer.email,
+            universityCard: patch.reviewer.universityCard,
+          }
+        : null,
+      decidedAt: patch.statusReviewedAt ?? null,
+    });
+  }
+
+  patchAdminUsersListRows(queryClient, patch);
+
+  // Pending queue: drop when leaving PENDING.
+  if (patch.status && patch.status !== "PENDING") {
+    queryClient.setQueriesData<UserLike[]>(
+      { queryKey: queryKeys.users.pendingRoot },
+      (old) => (old ? old.filter((u) => u.id !== patch.userId) : old),
+    );
+    for (const [pendingKey, rows] of queryClient.getQueriesData<UserLike[]>({
+      queryKey: queryKeys.users.pendingRoot,
+    })) {
+      if (Array.isArray(rows) && rows.length === 0) {
+        markDensifiedEmpty(pendingKey);
+      }
+    }
+    syncPendingSignUpsNav(queryClient);
+  }
+
+  syncUsersNav(queryClient);
+
+  if (patch.status) {
+    patchAdminStatsOnUserStatusChange(queryClient, {
+      userId: patch.userId,
+      fromStatus,
+      toStatus: patch.status,
+      reviewer: patch.reviewer,
+      statusReviewedAt: patch.statusReviewedAt,
+    });
+  }
+
+  // Overview Admins KPI value (not make-admin request badges).
+  if (patch.role !== undefined) {
+    patchAdminStatsOnUserRoleChange(queryClient, {
+      fromRole,
+      toRole: patch.role,
+    });
+  }
+
+  if (patch.status !== undefined || patch.role !== undefined) {
+    evictAnalyticsCaches(queryClient);
+  }
+}
+
+/**
+ * REJECTED → PENDING re-apply: patch detail + upsert into pending signup queue.
+ */
+export function densifyUserRegistrationPending(
+  queryClient: QueryClient,
+  userId: string,
+): void {
+  if (!userId) return;
+  densifyUserWrite(queryClient, { userId, status: "PENDING" });
+
+  const detail = queryClient.getQueryData<UserLike>(
+    queryKeys.users.detail(userId),
+  );
+  const pendingKey = queryKeys.users.pending();
+  const row: UserLike = detail
+    ? { ...detail, id: userId, status: "PENDING" }
+    : { id: userId, status: "PENDING" };
+
+  queryClient.setQueryData<UserLike[]>(pendingKey, (old) => {
+    const rows = old ?? [];
+    const without = rows.filter((u) => u.id !== userId);
+    return [row, ...without];
+  });
+  clearDensifiedEmpty(pendingKey);
+  syncPendingSignUpsNav(queryClient);
+  syncUsersNav(queryClient);
+}

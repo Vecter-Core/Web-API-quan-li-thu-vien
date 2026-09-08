@@ -1,0 +1,884 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+    /* Alias so existing font-bebas-neue / var(--bebas-neue) keep working */
+    --bebas-neue: var(--font-bebas-neue);
+  }
+
+  html {
+    /* Reserve scrollbar space so content width does not shift when overflow appears */
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+  }
+
+  /* clip (not hidden) so position:sticky on .root-header still works */
+  html,
+  body {
+    @apply overflow-x-clip;
+  }
+
+  /* Thin near-transparent document scrollbar (WebKit) — right edge only */
+  html::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  html::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  html::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.35);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  html::-webkit-scrollbar-thumb:hover {
+    background: rgba(148, 163, 184, 0.5);
+    background-clip: padding-box;
+  }
+
+  .hide-scrollbar::-webkit-scrollbar {
+    width: 0px;
+    height: 0px;
+    border-radius: 0px;
+  }
+
+  .hide-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .hide-scrollbar::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 0px;
+  }
+
+  .hide-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: transparent;
+  }
+
+  /*
+   * Radix Select Viewport ships inline `overflow: hidden auto`, which paints a
+   * classic scrollbar track even when items fit (catalog/admin filters).
+   * CSS !important beats Radix's non-important inline overflow.
+   */
+  [data-radix-select-viewport] {
+    overflow-y: hidden !important;
+    scrollbar-width: none;
+  }
+
+  [data-radix-select-viewport]::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  /* Long lists only — set by SelectContent when scrollHeight exceeds clientHeight */
+  [data-radix-select-viewport][data-scrollable="true"] {
+    overflow-y: auto !important;
+  }
+}
+
+/*
+ * MUST stay outside @layer — react-remove-scroll-bar injects unlayered
+ * `body[data-scroll-locked] { … !important }` which beats layered overrides.
+ *
+ * Confirmed (debug H3): Select open sets data-scroll-locked + body overflow:hidden,
+ * which disables position:sticky — scrolled pages show headerTop ≈ -scrollY
+ * (navbar "toggles hidden"). Zero the padding/relative offset, restore overflow
+ * so sticky keeps working; RemoveScroll still traps wheel via JS listeners.
+ * Also cancel the scrollbar-gap margin (double gutter on tall pages).
+ */
+html body[data-scroll-locked] {
+  margin-right: 0 !important;
+  margin-top: 0 !important;
+  padding-top: 0 !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  position: static !important;
+  overflow: visible !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@layer components {
+  /* Click ripple — spawned by ui/button (pointer-events none; clipped by overflow-hidden) */
+  .btn-ripple {
+    position: absolute;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.35);
+    transform: scale(0);
+    animation: btn-ripple 0.55s ease-out forwards;
+    pointer-events: none;
+  }
+
+  @keyframes btn-ripple {
+    to {
+      transform: scale(4);
+      opacity: 0;
+    }
+  }
+
+  /* Auto shine sweep for primary book CTAs (Borrow / Details / Discover) */
+  .cta-shine-wrap {
+    position: relative;
+    display: inline-block;
+    overflow: hidden;
+    border-radius: 0.375rem; /* match Button rounded-md */
+  }
+
+  .cta-shine-wrap::after {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 85%;
+    background: linear-gradient(
+      105deg,
+      transparent 0%,
+      rgba(255, 255, 255, 0.35) 45%,
+      rgba(255, 255, 255, 0.55) 50%,
+      rgba(255, 255, 255, 0.35) 55%,
+      transparent 100%
+    );
+    transform: translateX(-100%) skewX(-8deg);
+    animation: cta-shine 4.5s cubic-bezier(0.35, 0, 0.15, 1) infinite;
+    pointer-events: none;
+    z-index: 1;
+  }
+
+  .cta-shine-button {
+    position: relative;
+    z-index: 0;
+  }
+
+  @keyframes cta-shine {
+    to {
+      transform: translateX(200%) skewX(-8deg);
+    }
+  }
+
+  .form-btn {
+    /* CSS-var primary cannot use /opacity in @apply — hover via color-mix */
+    @apply bg-primary text-dark-100 inline-flex min-h-14 w-full items-center justify-center rounded-md px-6 py-2 text-base font-medium !important;
+  }
+
+  .form-btn:hover {
+    background-color: color-mix(in srgb, var(--primary) 90%, black) !important;
+  }
+
+  /* Shared ui/Button default variant — same color-mix hover as .form-btn */
+  .btn-primary:hover:not(:disabled) {
+    background-color: color-mix(in srgb, var(--primary) 85%, black);
+  }
+
+  .form-input {
+    @apply w-full min-h-14 border-none text-base font-medium placeholder:font-normal text-white placeholder:text-light-100 focus-visible:ring-0 focus-visible:shadow-none bg-dark-300 !important;
+  }
+
+  /* Book Card — centered cover, full-width meta, visible soft glow, hover tilt */
+  .book-card__cover-wrap {
+    @apply relative inline-flex overflow-visible;
+  }
+
+  /*
+   * Soft cover-tinted splash (stronger than prior pass so it reads on navy).
+   * No border-radius disk clip; blur dissolves edges.
+   */
+  .book-card__glow {
+    position: absolute;
+    left: 50%;
+    top: 45%;
+    z-index: 0;
+    width: min(160%, 16rem);
+    height: min(160%, 18rem);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    background: radial-gradient(
+      ellipse at center,
+      rgba(255, 255, 255, 0.18) 0%,
+      color-mix(in srgb, var(--cover-glow, #e7c9a5) 48%, transparent) 30%,
+      color-mix(in srgb, var(--cover-glow, #e7c9a5) 20%, transparent) 50%,
+      transparent 70%
+    );
+    filter: blur(22px);
+    opacity: 0.8;
+  }
+
+  .book-card__cover-motion {
+    @apply transition-transform duration-200 ease-out;
+  }
+
+  .book-card:hover .book-card__cover-motion {
+    transform: scale(1.03) rotate(1.5deg);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .book-card__glow {
+      opacity: 0;
+      filter: none;
+    }
+
+    .book-card__cover-motion,
+    .book-card:hover .book-card__cover-motion {
+      transform: none;
+      transition: none;
+    }
+  }
+
+  .book-card__meta {
+    @apply text-center;
+  }
+
+  /* Reserve 2-line slots so short titles do not misalign genre rows across the grid */
+  .book-title {
+    @apply mt-2 line-clamp-2 min-h-[2.5rem] text-base font-medium text-white xs:min-h-[3.25rem] xs:text-lg;
+  }
+
+  .book-author {
+    @apply mt-1 line-clamp-2 min-h-[2.25rem] text-sm text-light-200 xs:min-h-[2.75rem] xs:text-base;
+  }
+
+  .book-genre-row {
+    @apply mt-1 flex min-w-0 flex-row items-center justify-center gap-1;
+  }
+
+  .book-genre-rating {
+    @apply shrink-0 text-sm text-light-100 xs:text-base;
+  }
+
+  .book-genre {
+    @apply line-clamp-1 min-w-0 text-sm italic text-light-100 xs:text-base;
+  }
+
+  .book-loaned {
+    @apply flex flex-row items-center gap-1 max-xs:justify-center;
+  }
+
+  .book-btn {
+    @apply bg-dark-600 mt-3 min-h-14 w-full font-bebas-neue text-base text-primary;
+  }
+
+  /* Book Cover */
+  .book-cover_extra_small {
+    @apply w-[28.95px] h-10;
+  }
+
+  .book-cover_small {
+    @apply w-[55px] h-[76px];
+  }
+
+  .book-cover_medium {
+    @apply w-[144px] h-[199px];
+  }
+
+  .book-cover_regular {
+    @apply xs:w-[174px] w-[114px] xs:h-[239px] h-[169px];
+  }
+
+  .book-cover_wide {
+    @apply xs:w-[296px] w-[256px] xs:h-[404px] h-[354px];
+  }
+
+  /* Book List — larger row gap so meta clears the next row’s covers */
+  .book-list {
+    @apply mt-10 grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-2 sm:gap-x-5 sm:gap-y-10 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 max-xs:justify-between xs:gap-x-10 xs:gap-y-12;
+  }
+
+  /* Book Overview — full-width title header above details/hero columns (REQ-0033) */
+  .book-overview {
+    /* overflow-x only — y visible so hero glow is not clipped */
+    @apply flex w-full max-w-full flex-col gap-6 overflow-x-hidden overflow-y-visible sm:gap-8;
+  }
+
+  .book-overview__header {
+    @apply w-full min-w-0 max-w-full;
+  }
+
+  /* Below md: hero above details; md+: details left, hero right */
+  .book-overview__body {
+    @apply flex w-full min-w-0 max-w-full flex-col items-center gap-6 overflow-visible sm:gap-12 md:flex-row md:items-start md:gap-8;
+  }
+
+  .book-overview__details {
+    @apply order-2 flex w-full min-w-0 max-w-full flex-1 flex-col gap-3 sm:gap-5 md:order-1;
+  }
+
+  .book-overview__hero {
+    @apply relative order-1 flex flex-1 justify-center overflow-visible md:order-2;
+  }
+
+  /*
+   * Soft spotlight splash behind the 3D cover (no border-radius disk clip).
+   * Blur + early transparent stops dissolve edges into the navy background.
+   */
+  .book-overview__hero-glow {
+    position: absolute;
+    left: 50%;
+    top: 48%;
+    z-index: 0;
+    width: min(160%, 38rem);
+    height: min(160%, 38rem);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    background: radial-gradient(
+      ellipse at center,
+      rgba(255, 255, 255, 0.14) 0%,
+      color-mix(in srgb, var(--cover-glow, #e7c9a5) 40%, transparent) 28%,
+      color-mix(in srgb, var(--cover-glow, #e7c9a5) 16%, transparent) 45%,
+      transparent 62%
+    );
+    filter: blur(28px);
+    opacity: 0.65;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .book-overview__hero-glow {
+      opacity: 0;
+      filter: none;
+    }
+  }
+
+  .book-overview h1 {
+    @apply text-4xl font-medium text-white sm:text-6xl;
+    @apply break-words;
+  }
+
+  .book-info {
+    @apply flex flex-row flex-wrap gap-3 text-base text-light-100 sm:gap-4 sm:text-xl;
+    @apply w-full max-w-full;
+  }
+
+  .book-copies {
+    @apply flex flex-row flex-wrap gap-4;
+  }
+
+  .book-copies p {
+    @apply text-xl text-light-100;
+  }
+
+  .book-copies p span {
+    @apply ml-2 font-medium text-primary;
+  }
+
+  .book-description {
+    @apply mt-2 text-justify text-base text-light-100 sm:text-xl;
+    @apply break-words;
+  }
+
+  .book-overview_btn {
+    @apply mt-4 min-h-14 w-fit bg-primary text-dark-100 max-md:w-full !important;
+  }
+
+  .book-overview_btn:hover {
+    background-color: color-mix(in srgb, var(--primary) 90%, black) !important;
+  }
+
+  /* File Upload */
+  .upload-btn {
+    @apply flex min-h-14 w-full min-w-0 items-center justify-center gap-1.5 rounded-md px-3;
+  }
+
+  .upload-filename {
+    @apply mt-1 w-full break-words text-center text-xs;
+  }
+
+  .progress {
+    @apply rounded-full bg-green-800 p-0.5 text-center font-bebas-neue text-[8px] font-medium leading-none text-light-100;
+  }
+
+  /* Search */
+  .search {
+    @apply relative mt-10 flex min-h-14 w-full items-center rounded-xl bg-dark-300 px-4;
+  }
+
+  .search-input {
+    @apply w-full border-none font-medium placeholder:font-normal text-white placeholder:text-light-100 focus-visible:ring-0 focus-visible:shadow-none !important;
+  }
+
+  /* Book Receipt */
+  .book-receipt_admin-btn {
+    @apply bg-light-300 rounded-md text-primary-admin font-medium hover:bg-light-300/80 !important;
+  }
+
+  /* Book Ticket */
+  #book-ticket {
+    @apply relative mt-10 hidden w-[544px] overflow-hidden bg-dark-300 py-8;
+  }
+
+  #book-ticket #book-details div {
+    @apply space-y-1 rounded-md border border-light-100/10 p-3;
+  }
+
+  #book-ticket #book-details div p:first-child {
+    @apply text-xs text-light-700;
+  }
+
+  #book-ticket #book-details div p:last-child {
+    @apply text-sm font-medium text-white;
+  }
+
+  #book-ticket #book-divider div:first-child {
+    @apply absolute -left-3.5 top-1/2 size-7 -translate-y-1/2 rounded-full bg-black;
+  }
+
+  #book-ticket #book-divider div:last-child {
+    @apply absolute -right-3.5 top-1/2 size-7 -translate-y-1/2 rounded-full bg-black;
+  }
+
+  .book-ticket-circles {
+    @apply absolute inset-x-0 -bottom-6 flex flex-row gap-1.5;
+  }
+
+  /* Not Found — light text assumes dark root-container / bg-pattern shell */
+  #not-found {
+    @apply flex justify-center items-center flex-col text-center w-full;
+  }
+
+  #not-found h4 {
+    @apply mt-6 text-xl font-medium text-white;
+  }
+
+  #not-found p {
+    @apply mt-1 w-[360px] text-light-100;
+  }
+
+  .not-found-btn {
+    @apply bg-primary font-bebas-neue min-w-[360px] mt-6 text-dark-100 text-xl min-h-12 !important;
+  }
+
+  .not-found-btn:hover {
+    background-color: color-mix(in srgb, var(--primary) 90%, black) !important;
+  }
+
+  /* Pagination */
+  #pagination {
+    @apply flex flex-row justify-end gap-3;
+  }
+
+  .pagination-btn_light {
+    @apply bg-light-300 text-dark-300 hover:bg-light-300/70 !important;
+  }
+
+  .pagination-btn_dark {
+    @apply bg-dark-300 hover:bg-dark-100 !important;
+  }
+
+  #pagination p {
+    @apply text-sm inline-flex items-center font-medium px-4 py-1.5 rounded-md text-center;
+  }
+
+  /* Sort */
+  .select-trigger {
+    @apply w-40 h-10 px-4 bg-dark-300 text-light-100 border-dark-100 !important;
+  }
+
+  .select-content {
+    @apply bg-dark-300 text-light-100 border-dark-100 !important;
+  }
+
+  .select-item {
+    @apply focus:bg-dark-600 focus:text-light-100 !important;
+  }
+}
+
+@layer utilities {
+  .gradient-vertical {
+    background: linear-gradient(180deg, #12141d 0%, #12151f 100%);
+  }
+
+  .gradient-gray {
+    background: linear-gradient(270deg, #37363a 0%, #353637 100%);
+  }
+
+  .gradient-blue {
+    background: linear-gradient(180deg, #232839 0%, #12141d 100%);
+  }
+
+  /* Auth — page scrolls on the browser right edge; illustration is fixed (no middle scrollbar) */
+  .auth-container {
+    @apply relative flex flex-col-reverse text-light-100 sm:block;
+  }
+
+  /* Left column: form centered, footer pinned to bottom of the pane */
+  .auth-form {
+    @apply flex min-h-screen flex-col bg-pattern bg-cover bg-top bg-dark-100 px-4 py-3 sm:w-1/2 sm:px-5 sm:py-10;
+  }
+
+  /*
+   * Auth card — stronger frost than api-docs /60 on this pane (dark-on-dark hid the glass).
+   * Easy revert: restore bg-dark-300/60 backdrop-blur-sm border-white/10.
+   */
+  .auth-box {
+    @apply mx-auto my-auto flex w-full max-w-xl flex-col gap-3 rounded-xl border border-white/15 bg-dark-300/35 p-4 text-light-100 shadow-[0_12px_28px_rgba(0,0,0,0.25)] backdrop-blur-md sm:gap-6 sm:p-10;
+  }
+
+  .auth-illustration {
+    @apply h-40 w-full sm:fixed sm:right-0 sm:top-0 sm:h-dvh sm:w-1/2;
+  }
+
+  /*
+   * Public app shell — background only.
+   * Horizontal gutters live on .page-shell so Header / main / Footer share one edge.
+   */
+  .root-container {
+    /* overflow-x-clip: contain horizontal bleed without breaking sticky Header */
+    @apply flex min-h-screen w-full max-w-full flex-1 flex-col overflow-x-clip bg-pattern bg-cover bg-top bg-dark-100;
+  }
+
+  /* Shared max-width + responsive gutters for navbar, pages, and footer */
+  .page-shell {
+    @apply mx-auto w-full max-w-9xl px-2 sm:px-4 xl:px-8;
+  }
+
+  /*
+   * Root public Header — sticky; transparent at top (dark).
+   * .root-header--scrolled: frosted dark blur.
+   * .root-header--light: frosted white admin chrome (slate-50 shows through).
+   */
+  .root-header {
+    /* items-center: brand + nav row share vertical middle (not top-edge) */
+    @apply sticky top-0 z-30 flex items-center justify-between bg-transparent py-2 transition-[background-color,backdrop-filter,box-shadow,color] duration-200;
+  }
+
+  .root-header--scrolled {
+    @apply bg-dark-100/55 shadow-sm backdrop-blur-sm;
+  }
+
+  /* Above Select/Dropdown portals (z-50) so hamburger stays visible when filters open */
+  .root-header--light {
+    @apply z-[60] border-b border-slate-200/80 bg-white/70 text-dark-400 shadow-sm backdrop-blur-md;
+  }
+
+  /* Nav chips (bell/avatar) center inside each li even if the row is text-tall */
+  .root-header ul {
+    @apply items-center;
+  }
+
+  .root-header li {
+    @apply flex list-none items-center;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .root-header {
+      @apply transition-none;
+    }
+  }
+
+  /*
+   * My Profile — glass headers, transparent tab track, soft KPI/row chrome.
+   * Overrides TabsList bg-muted / TabsTrigger active:bg-background (light track bug).
+   */
+  .glass-section-header {
+    @apply flex items-center gap-3 rounded-xl border border-white/10 bg-gradient-to-r from-white/10 via-white/5 to-transparent px-3 py-2.5 shadow-[0_12px_32px_rgba(0,0,0,0.3)] backdrop-blur-sm sm:gap-3.5 sm:px-4 sm:py-3;
+  }
+
+  .glass-section-header__icon {
+    @apply flex size-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-light-200 sm:size-10;
+  }
+
+  .profile-stats-panel {
+    @apply rounded-2xl border border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-transparent p-3 shadow-[0_20px_50px_rgba(0,0,0,0.35)] backdrop-blur-sm sm:p-4;
+  }
+
+  /* Transparent track — no outer white/muted pill */
+  .profile-tabs-list {
+    @apply !h-auto !w-full !grid !grid-cols-1 !gap-2 !border-0 !bg-transparent !p-0 !shadow-none sm:!grid-cols-2 lg:!grid-cols-4;
+  }
+
+  .profile-tab-trigger {
+    @apply !relative !inline-flex !h-auto !min-h-11 !w-full !items-center !justify-center !gap-2 !overflow-hidden !rounded-xl !border !border-white/15 !bg-dark-300/60 !px-3 !py-2.5 !text-xs !font-medium !text-light-100 !shadow-none !transition-colors hover:!bg-white/10 hover:!text-white sm:!text-sm;
+  }
+
+  .profile-tab-active-borrows[data-state="active"] {
+    @apply !border-blue-400/50 !bg-gradient-to-r !from-blue-500/40 !via-blue-500/20 !to-blue-500/10 !text-white !shadow-[0_10px_30px_rgba(59,130,246,0.3)];
+  }
+
+  .profile-tab-pending[data-state="active"] {
+    @apply !border-amber-400/50 !bg-gradient-to-r !from-amber-500/40 !via-amber-500/20 !to-amber-500/10 !text-white !shadow-[0_10px_30px_rgba(245,158,11,0.3)];
+  }
+
+  .profile-tab-history[data-state="active"] {
+    @apply !border-violet-400/50 !bg-gradient-to-r !from-violet-500/40 !via-violet-500/20 !to-violet-500/10 !text-white !shadow-[0_10px_30px_rgba(139,92,246,0.3)];
+  }
+
+  /* Distinct emerald/teal glow — not Borrow History violet (REQ-0033 polish). */
+  .profile-tab-reviews[data-state="active"] {
+    @apply !border-emerald-400/50 !bg-gradient-to-r !from-emerald-500/40 !via-teal-500/20 !to-emerald-500/10 !text-white !shadow-[0_10px_30px_rgba(16,185,129,0.35)];
+  }
+
+  .profile-kpi-card {
+    @apply flex items-center gap-2 rounded-xl border bg-gradient-to-r p-2.5 backdrop-blur-sm sm:gap-3 sm:p-3;
+  }
+
+  /*
+   * KPI StatCard — admin light-theme dashboard rows (Parent: CR-0003 / REQ-0034).
+   * Base is a white card matching .admin-panel; hue modifiers tint the icon tile
+   * only (no top bar); shadow/hover provide depth.
+   */
+  /*
+   * Canonical card padding (admin + root glass) — keep in sync with
+   * `CARD_PAD_CLASS` / `.admin-panel` → p-2 sm:p-4 only.
+   */
+  .surface-card {
+    @apply p-2 sm:p-4;
+  }
+
+  /*
+   * Borderless shell — accent via hue icon + badges only (no top bar).
+   * Shadow + hover depth kept in sync with admin panel cards.
+   */
+  .kpi-card {
+    @apply relative flex items-center gap-3 overflow-hidden rounded-xl bg-white p-2 shadow-md transition-shadow duration-200 hover:shadow-lg sm:p-4;
+  }
+
+  .kpi-card__icon {
+    @apply flex size-10 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500 sm:size-11;
+  }
+
+  .kpi-card__value {
+    @apply font-ibm-plex-sans text-xl font-medium text-dark-400 sm:text-2xl;
+  }
+
+  .kpi-card__title {
+    @apply text-xs font-medium text-light-500 sm:text-sm;
+  }
+
+  .kpi-card--blue .kpi-card__icon {
+    @apply bg-blue-50 text-blue-600;
+  }
+
+  .kpi-card--emerald .kpi-card__icon {
+    @apply bg-emerald-50 text-emerald-600;
+  }
+
+  .kpi-card--amber .kpi-card__icon {
+    @apply bg-amber-50 text-amber-600;
+  }
+
+  .kpi-card--rose .kpi-card__icon {
+    @apply bg-rose-50 text-rose-600;
+  }
+
+  .kpi-card--violet .kpi-card__icon {
+    @apply bg-violet-50 text-violet-600;
+  }
+
+  .kpi-card--slate .kpi-card__icon {
+    @apply bg-slate-100 text-slate-600;
+  }
+
+  /*
+   * Force dark glass — beats Card bg-card (#fff) when admin.css stays after soft nav.
+   */
+  .profile-borrow-row {
+    @apply mb-3 rounded-xl !border-white/10 !bg-dark-300/60 !text-light-100 shadow-[0_12px_28px_rgba(0,0,0,0.25)] backdrop-blur-sm transition-shadow duration-200 hover:shadow-[0_16px_36px_rgba(0,0,0,0.35)];
+  }
+
+  .profile-borrow-row--pending {
+    @apply border-l-[3px] border-l-amber-400/80;
+  }
+
+  .profile-borrow-row--borrowed {
+    @apply border-l-[3px] border-l-blue-400/80;
+  }
+
+  .profile-borrow-row--borrowed-soon {
+    @apply border-l-[3px] border-l-orange-400/80;
+  }
+
+  .profile-borrow-row--overdue {
+    @apply border-l-[3px] border-l-red-400/80;
+  }
+
+  .profile-borrow-row--returned {
+    @apply border-l-[3px] border-l-emerald-400/80;
+  }
+
+  /* Profile borrow-card CTAs — glass + hover glow; relative/overflow clip btn-ripple */
+  .profile-action-btn {
+    @apply relative inline-flex items-center gap-1 overflow-hidden rounded-lg border px-2.5 py-1.5 text-xs font-medium text-white backdrop-blur-sm transition-[box-shadow,background-color,transform] duration-200 disabled:cursor-not-allowed disabled:opacity-50 sm:px-3 sm:text-sm;
+  }
+
+  .profile-action-btn--return {
+    @apply border-orange-400/40 bg-gradient-to-r from-orange-500/45 via-orange-500/25 to-orange-600/30 shadow-[0_10px_28px_rgba(249,115,22,0.28)] hover:shadow-[0_14px_36px_rgba(249,115,22,0.4)];
+  }
+
+  .profile-action-btn--return-overdue {
+    @apply border-red-400/40 bg-gradient-to-r from-red-500/45 via-red-500/25 to-red-600/30 shadow-[0_10px_28px_rgba(239,68,68,0.28)] hover:shadow-[0_14px_36px_rgba(239,68,68,0.4)];
+  }
+
+  .profile-action-btn--renew {
+    @apply border-violet-400/40 bg-gradient-to-r from-violet-500/45 via-violet-500/25 to-purple-600/30 shadow-[0_10px_28px_rgba(139,92,246,0.28)] hover:shadow-[0_14px_36px_rgba(139,92,246,0.4)];
+  }
+
+  .profile-action-btn--details {
+    @apply border-blue-400/40 bg-gradient-to-r from-blue-500/45 via-blue-500/25 to-blue-600/30 shadow-[0_10px_28px_rgba(59,130,246,0.28)] hover:shadow-[0_14px_36px_rgba(59,130,246,0.4)];
+  }
+
+  .profile-action-btn--review {
+    @apply border-emerald-400/40 bg-gradient-to-r from-emerald-500/45 via-emerald-500/25 to-green-600/30 shadow-[0_10px_28px_rgba(16,185,129,0.28)] hover:shadow-[0_14px_36px_rgba(16,185,129,0.4)];
+  }
+
+  /* Make-admin glass CTAs (shared profile-action-btn host + ripple clip) */
+  /* CSS-var primary cannot use /opacity in @apply — borders/fills via color-mix */
+  .profile-action-btn--submit {
+    border-color: color-mix(in srgb, var(--primary) 40%, transparent);
+    background-image: linear-gradient(
+      to right,
+      color-mix(in srgb, var(--primary) 50%, transparent),
+      color-mix(in srgb, var(--primary) 30%, transparent),
+      color-mix(in srgb, #d97706 25%, transparent)
+    );
+    box-shadow: 0 10px 28px rgba(232, 198, 122, 0.28);
+  }
+
+  .profile-action-btn--submit:hover {
+    box-shadow: 0 14px 36px rgba(232, 198, 122, 0.4);
+  }
+
+  .profile-action-btn--clear {
+    @apply border-white/20 bg-gradient-to-r from-gray-500/35 via-gray-500/20 to-gray-600/25 shadow-[0_10px_28px_rgba(107,114,128,0.22)] hover:shadow-[0_14px_36px_rgba(107,114,128,0.35)];
+  }
+
+  .profile-action-btn--cancel-request {
+    @apply border-red-400/40 bg-gradient-to-r from-red-500/45 via-red-500/25 to-red-600/30 shadow-[0_10px_28px_rgba(239,68,68,0.28)] hover:shadow-[0_14px_36px_rgba(239,68,68,0.4)];
+  }
+
+  /* Central vertical rhythm for page content (not header/footer) */
+  .page-shell-main {
+    @apply w-full py-4;
+  }
+
+  /* Consistent list / grid / empty-state rhythm on public surfaces */
+  .stack-section {
+    @apply space-y-2 sm:space-y-4;
+  }
+
+  /*
+   * All Books search — native WebKit clear (x) matches Reset All (light-200).
+   * Default cancel glyph is near-black and invisible on dark-300 fields.
+   */
+  .catalog-search-input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    cursor: pointer;
+    background-color: rgb(
+      238 209 172 / 0.85
+    ); /* #EED1AC light-200 — matches Reset All */
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 6 6 18'/%3E%3Cpath d='m6 6 12 12'/%3E%3C/svg%3E");
+    mask-size: contain;
+    mask-repeat: no-repeat;
+    mask-position: center;
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 6 6 18'/%3E%3Cpath d='m6 6 12 12'/%3E%3C/svg%3E");
+    -webkit-mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+  }
+
+  /* All Books collection — roomy vertical gap between card rows */
+  .grid-cards {
+    @apply grid gap-x-3 gap-y-8 sm:gap-x-4 sm:gap-y-10;
+  }
+
+  .empty-panel {
+    @apply p-4 text-center sm:p-8;
+  }
+
+  /* Book Details */
+  /* pt-only: bottom gap owned by Related Recommendations (avoids stacked py + mt) */
+  .book-details {
+    @apply flex flex-col gap-8 pt-8 sm:gap-12 sm:pt-12 lg:flex-row lg:gap-16 lg:pt-16;
+    @apply w-full max-w-full overflow-hidden;
+  }
+
+  .book-details h3 {
+    @apply text-xl font-medium text-primary;
+  }
+
+  /* Library */
+  .library {
+    @apply mx-auto flex max-w-xl w-full flex-col text-center;
+  }
+
+  .library-subtitle {
+    @apply text-lg font-medium uppercase text-light-100;
+  }
+
+  .library-title {
+    @apply mt-2 text-3xl font-medium text-white xs:text-5xl;
+  }
+}
+
+@layer base {
+  :root {
+    --background: #ffffff;
+    --foreground: #16191e;
+    --card: #ffffff;
+    --card-foreground: #16191e;
+    --popover: #ffffff;
+    --popover-foreground: #16191e;
+    --primary: #e7c9a5;
+    --primary-foreground: #16191e;
+    --secondary: #f8f8ff;
+    --secondary-foreground: #16191e;
+    --muted: #f8f8ff;
+    --muted-foreground: #8d8d8d;
+    --accent: #f8f8ff;
+    --accent-foreground: #16191e;
+    --destructive: #ef3a4b;
+    --destructive-foreground: #ffffff;
+    --border: #e2e8f0;
+    --input: #e2e8f0;
+    --ring: #16191e;
+    --chart-1: #ef3a4b;
+    --chart-2: #027a48;
+    --chart-3: #25388c;
+    --chart-4: #e7c9a5;
+    --chart-5: #0089f1;
+    --radius: 0.5rem;
+  }
+  .dark {
+    --background: #16191e;
+    --foreground: #d6e0ff;
+    --card: #232839;
+    --card-foreground: #d6e0ff;
+    --popover: #232839;
+    --popover-foreground: #d6e0ff;
+    --primary: #e7c9a5;
+    --primary-foreground: #16191e;
+    --secondary: #3a354e;
+    --secondary-foreground: #d6e0ff;
+    --muted: #3a354e;
+    --muted-foreground: #eed1ac;
+    --accent: #3a354e;
+    --accent-foreground: #d6e0ff;
+    --destructive: #ef3a4b;
+    --destructive-foreground: #ffffff;
+    --border: #3a354e;
+    --input: #3a354e;
+    --ring: #e7c9a5;
+    --chart-1: #ef3a4b;
+    --chart-2: #027a48;
+    --chart-3: #25388c;
+    --chart-4: #e7c9a5;
+    --chart-5: #0089f1;
+  }
+}

@@ -1,0 +1,185 @@
+/**
+ * Users API Route
+ *
+ * GET /api/users
+ *
+ * Purpose: Get a list of users with optional search, filters, sorting, and pagination.
+ *
+ * Query Parameters:
+ * - search (optional): Search by name, email, or university ID
+ * - status (optional): Filter by status ("PENDING", "APPROVED", "REJECTED", or "all")
+ * - role (optional): Filter by role ("USER", "ADMIN", or "all")
+ * - sort (optional): Sort order ("name", "email", "created", "status")
+ * - page (optional): Page number (default: 1)
+ * - limit (optional): Users per page (default: 50)
+ *
+ * IMPORTANT: This route uses Node.js runtime (not Edge) because it needs database access
+ */
+
+import { NextRequest, NextResponse } from "next/server";
+import { headers } from "next/headers";
+import ratelimit from "@/lib/ratelimit";
+import { db } from "@/database/drizzle";
+import { users } from "@/database/schema";
+import { desc, asc, eq, and, ilike, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { authorizeAdminRoute } from "@/lib/auth/routeAuthorization";
+import { parsePagination } from "@/lib/pagination";
+import { mapAdminPrivilegeFields } from "@/lib/admin/mapPendingAdminRequestIds";
+
+export const runtime = "nodejs";
+
+/**
+ * Get users list with filters and pagination
+ *
+ * @param request - Next.js request object
+ * @returns JSON response with users array, pagination info
+ */
+export async function GET(request: NextRequest) {
+  try {
+    // Rate limiting to prevent abuse (applies to both authenticated and unauthenticated users)
+    // This endpoint returns user data (sensitive information, admin-only)
+    // Rate limiting provides protection against abuse
+    const ip = (await headers()).get("x-forwarded-for") || "127.0.0.1";
+    const { success } = await ratelimit.limit(ip);
+
+    if (!success) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Too Many Requests",
+          message: "Rate limit exceeded. Please try again later.",
+        },
+        { status: 429 }
+      );
+    }
+
+    const authorization = await authorizeAdminRoute();
+    if (!authorization.ok) return authorization.response;
+
+    const { searchParams } = new URL(request.url);
+
+    // Parse query parameters
+    const search = searchParams.get("search") || "";
+    const status = searchParams.get("status") || "";
+    const role = searchParams.get("role") || "";
+    const sort = searchParams.get("sort") || "name";
+    const { page, limit } = parsePagination(searchParams, 50);
+
+    // Build where conditions
+    const whereConditions = [];
+
+    // Search condition (name, email, or university ID) - case-insensitive using ILIKE
+    if (search) {
+      const searchPattern = `%${search}%`;
+      whereConditions.push(
+        or(
+          ilike(users.fullName, searchPattern),
+          ilike(users.email, searchPattern),
+          sql`CAST(${users.universityId} AS TEXT) ILIKE ${searchPattern}`
+        )
+      );
+    }
+
+    // Status filter
+    if (status && status !== "all") {
+      whereConditions.push(
+        eq(users.status, status as "PENDING" | "APPROVED" | "REJECTED")
+      );
+    }
+
+    // Role filter
+    if (role && role !== "all") {
+      whereConditions.push(eq(users.role, role as "USER" | "ADMIN"));
+    }
+
+    // Build sort order
+    let orderBy;
+    switch (sort) {
+      case "email":
+        orderBy = asc(users.email);
+        break;
+      case "created":
+        orderBy = desc(users.createdAt);
+        break;
+      case "status":
+        orderBy = asc(users.status);
+        break;
+      case "name":
+      default:
+        orderBy = asc(users.fullName);
+        break;
+    }
+
+    // Fetch users with pagination (+ signup status reviewer for Status column)
+    const offset = (page - 1) * limit;
+    const statusReviewer = alias(users, "status_reviewer");
+    const allUsers = await db
+      .select({
+        id: users.id,
+        fullName: users.fullName,
+        email: users.email,
+        universityId: users.universityId,
+        universityCard: users.universityCard,
+        status: users.status,
+        role: users.role,
+        lastActivityDate: users.lastActivityDate,
+        lastLogin: users.lastLogin,
+        createdAt: users.createdAt,
+        statusReviewedAt: users.statusReviewedAt,
+        statusReviewedBy: users.statusReviewedBy,
+        statusReviewedById: users.statusReviewedBy,
+        statusReviewedByName: statusReviewer.fullName,
+        statusReviewedByEmail: statusReviewer.email,
+        statusReviewedByUniversityCard: statusReviewer.universityCard,
+        // Exclude password for security
+      })
+      .from(users)
+      .leftJoin(statusReviewer, eq(users.statusReviewedBy, statusReviewer.id))
+      .where(whereConditions.length > 0 ? and(...whereConditions) : undefined)
+      .orderBy(orderBy)
+      .limit(limit)
+      .offset(offset);
+
+    const privilegeByUser = await mapAdminPrivilegeFields(
+      allUsers.map((u) => u.id),
+    );
+    const usersWithPending = allUsers.map((u) => {
+      const privilege = privilegeByUser.get(u.id);
+      return {
+        ...u,
+        pendingAdminRequestId: privilege?.pendingAdminRequestId ?? null,
+        latestAdminRequestStatus: privilege?.latestAdminRequestStatus ?? null,
+      };
+    });
+
+    // Get total count for pagination
+    const totalUsersResult = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(users)
+      .where(whereConditions.length > 0 ? and(...whereConditions) : undefined);
+
+    const totalUsers = Number(totalUsersResult[0]?.count ?? 0);
+    const totalPages = Math.max(1, Math.ceil(totalUsers / limit) || 1);
+
+    return NextResponse.json({
+      success: true,
+      users: usersWithPending,
+      total: totalUsers,
+      page,
+      totalPages,
+      limit,
+    });
+  } catch (error) {
+    console.error("Error fetching users:", error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Failed to fetch users",
+        message:
+          error instanceof Error ? error.message : "Unknown error occurred",
+      },
+      { status: 500 }
+    );
+  }
+}

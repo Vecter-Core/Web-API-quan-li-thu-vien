@@ -1,0 +1,2341 @@
+"use client";
+
+/**
+ * MyProfileTabs — borrow history with URL-synced tabs (?tab=), glass KPIs, RQ + SSR.
+ * Tabs: active-borrows | pending-requests | holds | borrow-history | my-reviews.
+ */
+
+import React from "react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import BookCover from "@/components/BookCover";
+import CountdownTimer from "@/components/CountdownTimer";
+import BorrowSkeleton from "@/components/skeletons/BorrowSkeleton";
+import AccountRegistrationNotice from "@/components/AccountRegistrationNotice";
+import GlassSectionHeader from "@/components/GlassSectionHeader";
+import MyReviewsTab from "@/components/MyReviewsTab";
+import ReservationsPanel, {
+  type ReservationSummary,
+} from "@/components/ReservationsPanel";
+import { countActiveHolds } from "@/lib/profile/activeHolds";
+import { FilterSelect } from "@/components/ui/filter-select";
+import type { AdminRequestReviewer } from "@/lib/admin/adminRequestTypes";
+import { formatBorrowDate } from "@/lib/profile/formatBorrowDates";
+import { formatMediumDateTime } from "@/lib/ui/formatMediumDate";
+import {
+  serializeBorrowTimestamp,
+  toStableBorrowDate,
+} from "@/lib/borrows/serializeBorrowTimestamp";
+import {
+  activeBorrowStatusFilterOptions,
+  borrowHistoryStatusFilterOptions,
+  filterActiveBorrows,
+  filterBorrowHistory,
+  filterPendingRequests,
+  hasNonDefaultProfileFilters,
+  type ActiveBorrowStatusFilter,
+  type BorrowHistoryStatusFilter,
+  type ReviewStatusFilter,
+} from "@/lib/profile/tabListFilters";
+import {
+  type ListPeriod,
+  periodFilterOptions,
+} from "@/lib/ui/periodFilterOptions";
+import { reviewStatusFilterOptions } from "@/lib/ui/reviewOptions";
+import {
+  FILTER_CLEAR_GLASS_BTN_CLASS,
+  filterChipGlassPillClass,
+} from "@/lib/ui/filter-chip-styles";
+import { DismissibleFilterChips } from "@/components/ui/DismissibleFilterChips";
+import type { FilterSelectOption } from "@/components/ui/filter-select";
+import { cn } from "@/lib/utils";
+import { withRippleClick } from "@/lib/ui/ripple";
+import {
+  Ban,
+  BookOpen,
+  Bookmark,
+  Clock,
+  Calendar,
+  AlertTriangle,
+  Star,
+  BookOpenText,
+  Sparkles,
+  RotateCcw,
+  Loader2,
+  CheckCircle2,
+  History,
+  Hourglass,
+  BarChart3,
+  Library,
+  Timer,
+  BadgeDollarSign,
+  BookMarked,
+  RefreshCw,
+  MessageSquareText,
+  CalendarCheck2,
+  CalendarClock,
+  Layers,
+  AlarmClockCheck,
+  RotateCwFadingClock,
+  FilterX,
+  X,
+} from "lucide-react";
+import PrefetchLink from "@/components/PrefetchLink";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useUserBorrows, useUserBookReviews, useUserReservations } from "@/hooks/useQueries";
+import { useCancelPendingBorrow, useReturnBook } from "@/hooks/useMutations";
+import { GLASS_ALERT } from "@/lib/ui/glassActionChrome";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import type { BorrowRecordFull } from "@/lib/services/borrows";
+import { useQueryClient } from "@tanstack/react-query";
+import { renewBorrowedBook } from "@/lib/actions/circulation";
+import { beginMutation, isLatestMutation } from "@/lib/utils/mutationOrdering";
+import { commitMutationCache } from "@/lib/query/mutationGateway";
+import {
+  patchBorrowCachesOnRenewal,
+  snapshotBorrowListBaselines,
+} from "@/lib/utils/patchBorrowCaches";
+import { densifyActivityLog } from "@/lib/utils/patchActivityCaches";
+import { showToast } from "@/lib/toast";
+import { queryKeys } from "@/lib/query/keys";
+import {
+  computeBorrowStats,
+  formatDueSoonHint,
+  getOverdueDays,
+  getRecordFine,
+} from "@/lib/profile/borrowStats";
+import { getCalendarDaysUntilDue } from "@/lib/fines/liveFine";
+import { BorrowLifecycleDates } from "@/components/admin/BorrowLifecycleDates";
+import { BorrowStatusBadge } from "@/lib/ui/semanticBadges";
+import {
+  parseProfileTab,
+  profileTabHref,
+  type ProfileTab,
+} from "@/lib/profile/profileTabs";
+import { useFineConfig } from "@/hooks/useQueries";
+import type { FineRateHistoryRow } from "@/lib/fines/types";
+
+// Define the actual data structure from the database query
+interface BorrowRecordWithBook {
+  id: string;
+  userId: string;
+  bookId: string;
+  borrowDate: Date;
+  dueDate: Date | null; // Can be null for pending requests
+  returnDate?: Date | null;
+  approvedAt?: Date | string | null;
+  cancelledAt?: Date | string | null;
+  renewedAt?: Date | string | null;
+  status: "PENDING" | "BORROWED" | "RETURNED" | "CANCELLED";
+  borrowedBy?: string | null;
+  returnedBy?: string | null;
+  fineAmount: number;
+  displayFineAmount?: number;
+  fineStatus?: string | null;
+  notes?: string | null;
+  renewalCount: number;
+  lastReminderSent?: Date | null;
+  updatedAt: Date | null;
+  updatedBy?: string | null;
+  createdAt: Date | null;
+  book: {
+    id: string;
+    title: string;
+    author: string;
+    genre: string;
+    rating: number;
+    totalCopies: number;
+    availableCopies: number;
+    description: string;
+    coverColor: string;
+    coverUrl: string;
+    videoUrl: string | null;
+    summary: string;
+    isbn?: string | null;
+    publicationYear?: number | null;
+    publisher?: string | null;
+    language?: string | null;
+    pageCount?: number | null;
+    edition?: string | null;
+    isActive: boolean;
+    createdAt: Date | null;
+    updatedAt: Date | null;
+    updatedBy?: string | null;
+  };
+}
+
+const PERIOD_FILTER_OPTIONS = periodFilterOptions("dark");
+const ACTIVE_STATUS_OPTIONS = activeBorrowStatusFilterOptions("dark");
+const HISTORY_STATUS_OPTIONS = borrowHistoryStatusFilterOptions("dark");
+const REVIEW_STATUS_OPTIONS = reviewStatusFilterOptions("dark");
+
+function ProfileTabFilterBar({
+  period,
+  onPeriodChange,
+  status,
+  onStatusChange,
+  statusOptions,
+  statusLabel,
+}: {
+  period: ListPeriod;
+  onPeriodChange: (value: ListPeriod) => void;
+  status?: string;
+  onStatusChange?: (value: string) => void;
+  statusOptions?: FilterSelectOption[];
+  statusLabel?: string;
+}) {
+  return (
+    <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
+      <FilterSelect
+        label="Period"
+        variant="dark"
+        labelLayout="embedded"
+        className="w-40 sm:w-44"
+        value={period}
+        onValueChange={(v) => onPeriodChange(v as ListPeriod)}
+        options={PERIOD_FILTER_OPTIONS}
+      />
+      {status != null && onStatusChange && statusOptions ? (
+        <FilterSelect
+          label={statusLabel ?? "Status"}
+          variant="dark"
+          labelLayout="embedded"
+          className="w-40 sm:w-44"
+          value={status}
+          onValueChange={onStatusChange}
+          options={statusOptions}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function filterOptionLabel(
+  options: FilterSelectOption[],
+  value: string,
+): string {
+  return options.find((o) => o.value === value)?.label ?? value;
+}
+
+function profileStatusChipTone(
+  value: string,
+): "muted" | "genre" | "warn" | "rating" {
+  if (
+    value === "due" ||
+    value === "CANCELLED" ||
+    value === "REJECTED"
+  ) {
+    return "warn";
+  }
+  if (
+    value === "extended" ||
+    value === "RETURNED" ||
+    value === "APPROVED"
+  ) {
+    return "genre";
+  }
+  if (value === "PENDING") return "rating";
+  return "muted";
+}
+
+/**
+ * Active period/status chips under GlassSectionHeader (admin/all-books parity).
+ * Only renders when filters differ from All Time / All Status defaults.
+ */
+function ProfileActiveFilterChips({
+  period,
+  onClearPeriod,
+  status,
+  onClearStatus,
+  statusOptions,
+  onReset,
+}: {
+  period: ListPeriod;
+  onClearPeriod: () => void;
+  status?: string;
+  onClearStatus?: () => void;
+  statusOptions?: FilterSelectOption[];
+  onReset: () => void;
+}) {
+  if (!hasNonDefaultProfileFilters({ period, status })) return null;
+
+  const groups: {
+    label: string;
+    values: string[];
+    onClear: () => void;
+    renderBadge: (value: string) => React.ReactNode;
+  }[] = [];
+
+  if (period !== "all") {
+    groups.push({
+      label: "Period",
+      values: [period],
+      onClear: onClearPeriod,
+      renderBadge: (value) => (
+        <span className={cn(filterChipGlassPillClass("muted"), "pr-2.5")}>
+          {filterOptionLabel(PERIOD_FILTER_OPTIONS, value)}
+        </span>
+      ),
+    });
+  }
+
+  if (
+    status != null &&
+    status !== "all" &&
+    onClearStatus &&
+    statusOptions
+  ) {
+    groups.push({
+      label: "Status",
+      values: [status],
+      onClear: onClearStatus,
+      renderBadge: (value) => (
+        <span
+          className={cn(
+            filterChipGlassPillClass(profileStatusChipTone(value)),
+            "pr-2.5",
+          )}
+        >
+          {filterOptionLabel(statusOptions, value)}
+        </span>
+      ),
+    });
+  }
+
+  if (groups.length === 0) return null;
+
+  return (
+    <DismissibleFilterChips
+      variant="dark"
+      groups={groups}
+      onReset={onReset}
+    />
+  );
+}
+
+function ProfileFilterEmptyState({
+  message,
+  onClear,
+}: {
+  message: string;
+  onClear: () => void;
+}) {
+  return (
+    <div role="status" className="profile-borrow-row p-4 text-center sm:p-6">
+      <p className="text-sm text-light-200 sm:text-base">{message}</p>
+      <button
+        type="button"
+        onClick={onClear}
+        className={cn(FILTER_CLEAR_GLASS_BTN_CLASS, "mt-3 sm:mt-4")}
+      >
+        <FilterX className="size-4" aria-hidden />
+        Clear Filters
+      </button>
+    </div>
+  );
+}
+
+interface MyProfileTabsProps {
+  /**
+   * User ID (required for React Query)
+   */
+  userId: string;
+  /**
+   * DB-backed account status (gates borrow RQ; PENDING/REJECTED get friendly shell)
+   */
+  accountStatus?: string | null;
+  /**
+   * Email for registration notice (optional)
+   */
+  accountEmail?: string | null;
+  /**
+   * Account createdAt for registration notice strip
+   */
+  accountCreatedAt?: Date | string | null;
+  /**
+   * When registration was approved/rejected (statusReviewedAt)
+   */
+  accountDecidedAt?: Date | string | null;
+  /**
+   * Admin who approved/rejected registration
+   */
+  accountDecisionActor?: AdminRequestReviewer | null;
+  /**
+   * Initial active borrows from SSR (prevents duplicate fetch)
+   */
+  initialActiveBorrows?: BorrowRecordWithBook[];
+  /**
+   * Initial pending requests from SSR (prevents duplicate fetch)
+   */
+  initialPendingRequests?: BorrowRecordWithBook[];
+  /**
+   * Initial borrow history from SSR (prevents duplicate fetch)
+   */
+  initialBorrowHistory?: BorrowRecordWithBook[];
+  /**
+   * SSR-fetched own reviews (any status) — hydrates the "My Reviews" tab so
+   * it paints instantly with no client-fetch loading flash on first visit.
+   * The live count (KPI card + tab badge) is derived from this same query
+   * so it can never drift from the list after a create/delete/moderation.
+   */
+  initialReviews?: AdminBookReviewItem[];
+  /**
+   * SSR reservations for Holds tab + Active holds KPI.
+   */
+  initialReservations?: ReservationSummary[];
+  /**
+   * SSR daily fine rate from system_config (live overdue accrual).
+   */
+  dailyFineRate: number;
+  /**
+   * SSR fine rate history for pro-rata live accrual.
+   */
+  rateHistory?: FineRateHistoryRow[];
+  /**
+   * Legacy props for backward compatibility (deprecated, use initial* props instead)
+   */
+  activeBorrows?: BorrowRecordWithBook[];
+  pendingRequests?: BorrowRecordWithBook[];
+  borrowHistory?: BorrowRecordWithBook[];
+}
+
+const MyProfileTabs: React.FC<MyProfileTabsProps> = ({
+  userId,
+  accountStatus = null,
+  accountEmail = null,
+  accountCreatedAt = null,
+  accountDecidedAt = null,
+  accountDecisionActor = null,
+  // initialActiveBorrows / initialPendingRequests are kept in the interface for
+  // backward compatibility; superseded by initialBorrowHistory as the single source.
+  initialActiveBorrows: _initialActiveBorrows,
+  initialPendingRequests: _initialPendingRequests,
+  initialBorrowHistory,
+  initialReviews,
+  initialReservations = [],
+  dailyFineRate,
+  rateHistory = [],
+  // Legacy props kept for external callers — allBorrows memo is the authoritative source.
+  activeBorrows: _legacyActiveBorrows,
+  pendingRequests: _legacyPendingRequests,
+  borrowHistory: _legacyBorrowHistory,
+}) => {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { data: liveFineConfig } = useFineConfig();
+  const effectiveDailyRate =
+    typeof liveFineConfig?.fineAmount === "number"
+      ? liveFineConfig.fineAmount
+      : dailyFineRate;
+
+  // Use React Query mutation for returning book
+  const returnBookMutation = useReturnBook();
+  const cancelPendingMutation = useCancelPendingBorrow();
+  const queryClient = useQueryClient();
+  const [isRenewPending, startRenewTransition] = React.useTransition();
+  const [renewingRecordId, setRenewingRecordId] = React.useState<string | null>(
+    null,
+  );
+  const [returningRecordId, setReturningRecordId] = React.useState<
+    string | null
+  >(null);
+  const [cancellingRecordId, setCancellingRecordId] = React.useState<
+    string | null
+  >(null);
+  /** Snapshot for Cancel Request dialog — lives outside the list card so optimistic CANCELLED unmount cannot close it. */
+  const [cancelPendingTarget, setCancelPendingTarget] =
+    React.useState<BorrowRecordWithBook | null>(null);
+  /** Return / Renew confirms — same lift pattern as Cancel Request. */
+  const [returnTarget, setReturnTarget] =
+    React.useState<BorrowRecordWithBook | null>(null);
+  const [renewTarget, setRenewTarget] =
+    React.useState<BorrowRecordWithBook | null>(null);
+
+  // Build typed SSR initialData once per mount so React Query treats it as fresh.
+  // BorrowRecordFull extends BorrowRecord with an optional nested `book`, matching
+  // what the API's INNER JOIN actually returns, so no any-casting is needed.
+  const ssrSource = initialBorrowHistory ?? _legacyBorrowHistory;
+  const ssrInitialData: BorrowRecordFull[] | undefined = ssrSource
+    ? ssrSource.map((record): BorrowRecordFull => ({
+        id: record.id,
+        userId: record.userId,
+        bookId: record.bookId,
+        borrowDate: record.borrowDate,
+        dueDate: record.dueDate
+          ? serializeBorrowTimestamp(record.dueDate)
+          : null,
+        returnDate: record.returnDate
+          ? serializeBorrowTimestamp(record.returnDate)
+          : null,
+        approvedAt: serializeBorrowTimestamp(
+          (record as { approvedAt?: string | Date | null }).approvedAt,
+        ),
+        cancelledAt: serializeBorrowTimestamp(
+          (record as { cancelledAt?: string | Date | null }).cancelledAt,
+        ),
+        renewedAt: serializeBorrowTimestamp(
+          (record as { renewedAt?: string | Date | null }).renewedAt,
+        ),
+        status: record.status,
+        borrowedBy: record.borrowedBy ?? null,
+        returnedBy: record.returnedBy ?? null,
+        fineAmount:
+          typeof record.fineAmount === "number"
+            ? record.fineAmount.toString()
+            : String(record.fineAmount || "0"),
+        displayFineAmount:
+          typeof (record as { displayFineAmount?: string | number })
+            .displayFineAmount === "number"
+            ? String(
+                (record as { displayFineAmount?: number }).displayFineAmount,
+              )
+            : ((record as { displayFineAmount?: string }).displayFineAmount ??
+              undefined),
+        fineStatus:
+          (record as { fineStatus?: string | null }).fineStatus ?? null,
+        notes: record.notes ?? null,
+        renewalCount: record.renewalCount,
+        lastReminderSent: record.lastReminderSent ?? null,
+        updatedAt: record.updatedAt,
+        updatedBy: record.updatedBy ?? null,
+        createdAt: record.createdAt,
+        // Preserve the nested book from SSR — this is what prevents "Unknown Book"
+        // on first navigation before the background API fetch completes.
+        book: record.book,
+      }))
+    : undefined;
+
+  // Stable timestamp captured once at mount via useState lazy initialiser.
+  // The function is only called on the first render (never on re-renders), keeping
+  // the value stable across the component's lifetime.
+  // Passed as initialDataUpdatedAt to tell React Query the SSR snapshot is fresh,
+  // preventing an immediate background refetch that could overwrite valid book data.
+  const [ssrTimestamp] = React.useState<number>(() => Date.now());
+
+  // Use React Query to fetch all user borrows (no status filter to get all).
+  // The API returns borrow records WITH book details (from /api/borrow-records INNER JOIN).
+  // React Query invalidates and refetches on mutations, ensuring immediate UI updates.
+  const {
+    data: reactQueryBorrows,
+    isLoading,
+    isError,
+    error,
+  } = useUserBorrows(
+    userId,
+    undefined, // no status filter — fetch all, filter client-side
+    ssrInitialData,
+    ssrInitialData ? ssrTimestamp : undefined,
+    accountStatus,
+  );
+
+  // Same queryKey as MyReviewsTab's own hook call below — TanStack Query
+  // dedupes to one request/cache entry, so the KPI card + tab badge here stay
+  // in sync with create/delete/moderation mutations without a second fetch.
+  const { data: liveReviews = initialReviews ?? [] } = useUserBookReviews(
+    userId,
+    initialReviews,
+  );
+  const liveTotalReviews = liveReviews.length;
+
+  const [ssrReservationsAt] = React.useState(() => Date.now());
+  const { data: liveReservations = initialReservations } = useUserReservations(
+    userId,
+    initialReservations,
+    initialReservations.length > 0 ? ssrReservationsAt : undefined,
+  );
+  // Shared holds clock — KPI + embedded ReservationsPanel stay in lockstep.
+  const [holdsClock, setHoldsClock] = React.useState<number | null>(null);
+  React.useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const advance = () => {
+      const now = Date.now();
+      setHoldsClock(now);
+      const nextBoundary = liveReservations
+        .filter((item) => item.status === "READY" && item.readyExpiresAt)
+        .map((item) => new Date(item.readyExpiresAt!).getTime())
+        .filter((timestamp) => timestamp > now)
+        .sort((left, right) => left - right)[0];
+      if (nextBoundary)
+        timer = setTimeout(
+          advance,
+          Math.min(nextBoundary - now + 1, 2_147_483_647),
+        );
+    };
+    advance();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [liveReservations]);
+  const activeHoldsCount = React.useMemo(
+    () => countActiveHolds(liveReservations, holdsClock),
+    [liveReservations, holdsClock],
+  );
+
+  const registrationLocked =
+    accountStatus === "PENDING" || accountStatus === "REJECTED";
+
+  // Transform React Query data (BorrowRecordFull[]) into the local BorrowRecordWithBook shape.
+  // TanStack Query provides structural sharing, so a pure memoized transform keeps stable
+  // references across renders and avoids unnecessary downstream recalculations.
+  const allBorrowsFromQuery: BorrowRecordWithBook[] = React.useMemo(() => {
+    if (!reactQueryBorrows || reactQueryBorrows.length === 0) {
+      return [];
+    }
+
+    const getStableDate = toStableBorrowDate;
+
+    // reactQueryBorrows is BorrowRecordFull[] — `record.book` is properly typed,
+    // no any-casting needed. The API's INNER JOIN guarantees book is present
+    // whenever the record is returned.
+    return reactQueryBorrows.map((record): BorrowRecordWithBook => ({
+      id: record.id,
+      userId: record.userId,
+      bookId: record.bookId,
+      borrowDate: getStableDate(record.borrowDate) || new Date(),
+      dueDate: getStableDate(record.dueDate),
+      returnDate: getStableDate(record.returnDate),
+      approvedAt: getStableDate(record.approvedAt),
+      cancelledAt: getStableDate(record.cancelledAt),
+      renewedAt: getStableDate(record.renewedAt),
+      status: record.status,
+      borrowedBy: record.borrowedBy,
+      returnedBy: record.returnedBy,
+      fineAmount:
+        typeof record.fineAmount === "string"
+          ? parseFloat(record.fineAmount)
+          : record.fineAmount || 0,
+      displayFineAmount:
+        typeof record.displayFineAmount === "string"
+          ? parseFloat(record.displayFineAmount)
+          : typeof record.displayFineAmount === "number"
+            ? record.displayFineAmount
+            : undefined,
+      fineStatus: record.fineStatus ?? null,
+      notes: record.notes,
+      renewalCount: record.renewalCount || 0,
+      lastReminderSent: getStableDate(record.lastReminderSent),
+      updatedAt: getStableDate(record.updatedAt),
+      updatedBy: record.updatedBy,
+      createdAt: getStableDate(record.createdAt),
+      // Use the API's book JOIN result; fall back to a sentinel only when truly absent
+      // (should not happen with INNER JOIN, but guards against orphaned cache entries).
+      book: record.book ?? {
+        id: record.bookId,
+        title: "Unknown Book",
+        author: "Unknown Author",
+        genre: "",
+        rating: 0,
+        totalCopies: 0,
+        availableCopies: 0,
+        description: "",
+        coverColor: "",
+        coverUrl: "",
+        videoUrl: "",
+        summary: "",
+        isActive: true,
+        createdAt: null,
+        updatedAt: null,
+      },
+    }));
+  }, [reactQueryBorrows]);
+
+  // Single authoritative source for all three tab filters.
+  // Prefers React Query data ONLY when it contains valid book data (title !== sentinel).
+  // Falls back to SSR initialBorrowHistory when the cache lacks the book JOIN field
+  // (e.g. stale entry from an older code version without the INNER JOIN).
+  const allBorrows: BorrowRecordWithBook[] = React.useMemo(() => {
+    const hasValidBooks =
+      allBorrowsFromQuery.length > 0 &&
+      allBorrowsFromQuery.some(
+        (r) => r.book?.title && r.book.title !== "Unknown Book",
+      );
+    if (hasValidBooks) return allBorrowsFromQuery;
+    return initialBorrowHistory ?? _legacyBorrowHistory ?? [];
+  }, [allBorrowsFromQuery, initialBorrowHistory, _legacyBorrowHistory]);
+
+  // Filter borrows by status (client-side) — all derived from the single guarded source.
+  const activeBorrows: BorrowRecordWithBook[] = React.useMemo(
+    () => allBorrows.filter((r) => r.status === "BORROWED"),
+    [allBorrows],
+  );
+
+  const pendingRequests: BorrowRecordWithBook[] = React.useMemo(
+    () => allBorrows.filter((r) => r.status === "PENDING"),
+    [allBorrows],
+  );
+
+  const borrowHistory: BorrowRecordWithBook[] = React.useMemo(
+    () =>
+      allBorrows.filter(
+        (r) => r.status === "RETURNED" || r.status === "CANCELLED",
+      ),
+    [allBorrows],
+  );
+
+  // URL is source of truth for the open tab (refresh-safe, shareable)
+  const activeTabValue = parseProfileTab(searchParams.get("tab"));
+
+  // Client-only list filters (period + tab status) — cleared on tab change via handleTabChange.
+  const [listPeriod, setListPeriod] = React.useState<ListPeriod>("all");
+  const [activeStatusFilter, setActiveStatusFilter] =
+    React.useState<ActiveBorrowStatusFilter>("all");
+  const [historyStatusFilter, setHistoryStatusFilter] =
+    React.useState<BorrowHistoryStatusFilter>("all");
+  const [reviewStatusFilter, setReviewStatusFilter] =
+    React.useState<ReviewStatusFilter>("all");
+
+  const clearProfileListFilters = React.useCallback(() => {
+    setListPeriod("all");
+    setActiveStatusFilter("all");
+    setHistoryStatusFilter("all");
+    setReviewStatusFilter("all");
+  }, []);
+
+  const handleTabChange = React.useCallback(
+    (value: string) => {
+      const tab = parseProfileTab(value);
+      clearProfileListFilters();
+      router.replace(profileTabHref(tab), { scroll: false });
+    },
+    [router, clearProfileListFilters],
+  );
+
+  // Normalize missing/legacy ?tab= to canonical value without scrolling
+  React.useEffect(() => {
+    const raw = searchParams.get("tab");
+    const canonical = parseProfileTab(raw);
+    if (raw !== canonical) {
+      router.replace(profileTabHref(canonical), { scroll: false });
+    }
+  }, [searchParams, router]);
+
+  const borrowStats = React.useMemo(
+    () =>
+      computeBorrowStats(
+        allBorrows.map((record) => ({
+          id: record.id,
+          bookId: record.bookId,
+          status: record.status,
+          dueDate: record.dueDate,
+          returnDate: record.returnDate,
+          borrowDate: record.borrowDate,
+          createdAt: record.createdAt,
+          fineAmount: record.fineAmount,
+          fineStatus: record.fineStatus,
+          renewalCount: record.renewalCount,
+          bookTitle: record.book?.title,
+        })),
+        liveTotalReviews,
+        effectiveDailyRate,
+        new Date(),
+        rateHistory,
+      ),
+    [allBorrows, liveTotalReviews, effectiveDailyRate, rateHistory],
+  );
+
+  const sortedHistory = React.useMemo(
+    () =>
+      [...borrowHistory].sort(
+        (a, b) =>
+          new Date(b.createdAt || 0).getTime() -
+          new Date(a.createdAt || 0).getTime(),
+      ),
+    [borrowHistory],
+  );
+
+  const filteredActiveBorrows = React.useMemo(
+    () => filterActiveBorrows(activeBorrows, listPeriod, activeStatusFilter),
+    [activeBorrows, listPeriod, activeStatusFilter],
+  );
+
+  const filteredPendingRequests = React.useMemo(
+    () => filterPendingRequests(pendingRequests, listPeriod),
+    [pendingRequests, listPeriod],
+  );
+
+  const filteredHistory = React.useMemo(
+    () =>
+      filterBorrowHistory(sortedHistory, listPeriod, historyStatusFilter),
+    [sortedHistory, listPeriod, historyStatusFilter],
+  );
+
+  // PENDING/REJECTED: keep chrome + zero KPIs + tabs; show registration notice (no borrow RQ / no red 403)
+  if (registrationLocked) {
+    const lockedKpiValues: Array<{
+      key: string;
+      title: string;
+      hint: string;
+      value: string | number;
+      icon: React.ReactNode;
+      tone: string;
+    }> = [
+      {
+        key: "total",
+        title: "Total Borrows",
+        hint: "All requests ever placed",
+        value: 0,
+        icon: <Layers className="size-4 shrink-0" />,
+        tone: "from-slate-500/25 via-slate-500/10 to-slate-500/5 border-slate-400/30 text-slate-100 shadow-[0_10px_30px_rgba(148,163,184,0.15)]",
+      },
+      {
+        key: "pending",
+        title: "Pending",
+        hint: "Awaiting admin approval",
+        value: 0,
+        icon: <Hourglass className="size-4 shrink-0" />,
+        tone: "from-amber-500/25 via-amber-500/10 to-amber-500/5 border-amber-400/30 text-amber-100 shadow-[0_10px_30px_rgba(245,158,11,0.2)]",
+      },
+      {
+        key: "active",
+        title: "Active Loans",
+        hint: "Checked out right now",
+        value: 0,
+        icon: <BookMarked className="size-4 shrink-0" />,
+        tone: "from-blue-500/25 via-blue-500/10 to-blue-500/5 border-blue-400/30 text-blue-100 shadow-[0_10px_30px_rgba(59,130,246,0.2)]",
+      },
+      {
+        key: "holds",
+        title: "Active Holds",
+        hint: "Waiting or ready reservations",
+        value: 0,
+        icon: <Bookmark className="size-4 shrink-0" />,
+        tone: "from-fuchsia-500/25 via-fuchsia-500/10 to-fuchsia-500/5 border-fuchsia-400/30 text-fuchsia-100 shadow-[0_10px_30px_rgba(217,70,239,0.2)]",
+      },
+      {
+        key: "returned",
+        title: "Returned",
+        hint: "Successfully checked in",
+        value: 0,
+        icon: <CheckCircle2 className="size-4 shrink-0" />,
+        tone: "from-emerald-500/25 via-emerald-500/10 to-emerald-500/5 border-emerald-400/30 text-emerald-100 shadow-[0_10px_30px_rgba(16,185,129,0.2)]",
+      },
+      {
+        key: "reviews",
+        title: "Reviews Written",
+        hint: "Your published ratings",
+        value: liveTotalReviews,
+        icon: <MessageSquareText className="size-4 shrink-0" />,
+        tone: "from-indigo-500/25 via-indigo-500/10 to-indigo-500/5 border-indigo-400/30 text-indigo-100 shadow-[0_10px_30px_rgba(99,102,241,0.2)]",
+      },
+      {
+        key: "totalFines",
+        title: "Total Fines",
+        hint: "Sum of accrued fines",
+        value: "—",
+        icon: <BadgeDollarSign className="size-4 shrink-0" />,
+        tone: "from-rose-500/25 via-rose-500/10 to-rose-500/5 border-rose-400/30 text-rose-100 shadow-[0_10px_30px_rgba(244,63,94,0.2)]",
+      },
+    ];
+
+    return (
+      <div className="w-full">
+        <div className="mb-4 sm:mb-6">
+          <h1 className="text-xl font-medium text-light-100 sm:text-3xl">
+            My Borrowing History
+          </h1>
+          <p className="text-sm text-light-200 sm:text-base">
+            Track active loans, pending requests, and your full borrow history
+          </p>
+        </div>
+
+        <section className="profile-stats-panel mb-4 sm:mb-6">
+          <GlassSectionHeader
+            className="mb-3 sm:mb-4"
+            icon={<BarChart3 className="size-5" />}
+            title="Borrow Statistics"
+            subtitle="Available after your registration is approved"
+          />
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-3 md:grid-cols-3">
+            {lockedKpiValues.map((item) => (
+              <div key={item.key} className={`profile-kpi-card ${item.tone}`}>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="shrink-0 opacity-90">{item.icon}</span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-medium leading-tight sm:text-sm">
+                      {item.title}
+                    </p>
+                    <p className="text-[10px] leading-snug opacity-75 sm:text-xs">
+                      {item.hint}
+                    </p>
+                  </div>
+                </div>
+                <p className="shrink-0 text-lg font-medium leading-none sm:text-xl">
+                  {item.value}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <Tabs
+          value={activeTabValue}
+          onValueChange={handleTabChange}
+          className="w-full"
+          suppressHydrationWarning
+        >
+          <TabsList className="profile-tabs-list mb-4 sm:mb-6">
+            <TabsTrigger
+              value="active-borrows"
+              className="profile-tab-trigger profile-tab-active-borrows"
+            >
+              <BookOpen className="size-4 shrink-0" />
+              <span>Active Borrows (0)</span>
+            </TabsTrigger>
+            <TabsTrigger
+              value="pending-requests"
+              className="profile-tab-trigger profile-tab-pending"
+            >
+              <Hourglass className="size-4 shrink-0" />
+              <span>Pending Requests (0)</span>
+            </TabsTrigger>
+            <TabsTrigger
+              value="holds"
+              className="profile-tab-trigger profile-tab-holds"
+            >
+              <Bookmark className="size-4 shrink-0" />
+              <span>Active Holds (0)</span>
+            </TabsTrigger>
+            <TabsTrigger
+              value="borrow-history"
+              className="profile-tab-trigger profile-tab-history"
+            >
+              <History className="size-4 shrink-0" />
+              <span>Borrow History (0)</span>
+            </TabsTrigger>
+          </TabsList>
+
+          {(
+            [
+              {
+                value: "active-borrows" as const,
+                title: "Active loans",
+                subtitle: "Books currently checked out to you",
+                icon: <BookOpen className="size-5 text-blue-300" />,
+              },
+              {
+                value: "pending-requests" as const,
+                title: "Pending requests",
+                subtitle: "Awaiting librarian approval before checkout",
+                icon: <Hourglass className="size-5 text-amber-300" />,
+              },
+              {
+                value: "holds" as const,
+                title: "Active holds",
+                subtitle: "Active reservations waiting in queue or ready to claim",
+                icon: <Bookmark className="size-5 text-fuchsia-300" />,
+              },
+              {
+                value: "borrow-history" as const,
+                title: "Borrow history",
+                subtitle: "Completed returns and past loans",
+                icon: <History className="size-5 text-violet-300" />,
+              },
+            ] as const
+          ).map((section) => (
+            <TabsContent
+              key={section.value}
+              value={section.value}
+              className="mt-0"
+            >
+              <div className="space-y-2 sm:space-y-4">
+                <GlassSectionHeader
+                  icon={section.icon}
+                  title={section.title}
+                  subtitle={section.subtitle}
+                />
+                <div className="profile-borrow-row p-2 sm:p-4">
+                  <AccountRegistrationNotice
+                    accountStatus={
+                      accountStatus === "REJECTED" ? "REJECTED" : "PENDING"
+                    }
+                    context="profile"
+                    email={accountEmail}
+                    createdAt={accountCreatedAt}
+                    decidedAt={accountDecidedAt}
+                    decisionActor={accountDecisionActor}
+                  />
+                </div>
+              </div>
+            </TabsContent>
+          ))}
+        </Tabs>
+      </div>
+    );
+  }
+
+  // Show skeleton while loading (only if no data at all - not during refetch)
+  // CRITICAL: Use isLoading (not isFetching) to only show skeleton on initial load
+  // isFetching would show skeleton during refetch, causing flicker
+  if (
+    isLoading &&
+    !reactQueryBorrows &&
+    (!initialBorrowHistory || initialBorrowHistory.length === 0)
+  ) {
+    return (
+      <div className="w-full">
+        <div className="mb-4 sm:mb-6">
+          <h1 className="text-xl font-medium text-light-100 sm:text-3xl">
+            My Borrowing History
+          </h1>
+          <p className="text-sm text-light-200 sm:text-base">
+            Track active loans, pending requests, and your full borrow history
+          </p>
+        </div>
+        <Tabs
+          value={activeTabValue}
+          onValueChange={handleTabChange}
+          className="w-full"
+          suppressHydrationWarning
+        >
+          <TabsList className="profile-tabs-list mb-4 sm:mb-6">
+            <TabsTrigger
+              value="active-borrows"
+              className="profile-tab-trigger profile-tab-active-borrows"
+            >
+              Active
+            </TabsTrigger>
+            <TabsTrigger
+              value="pending-requests"
+              className="profile-tab-trigger profile-tab-pending"
+            >
+              Pending
+            </TabsTrigger>
+            <TabsTrigger
+              value="borrow-history"
+              className="profile-tab-trigger profile-tab-history"
+            >
+              History
+            </TabsTrigger>
+            <TabsTrigger
+              value="my-reviews"
+              className="profile-tab-trigger profile-tab-reviews"
+            >
+              My Reviews
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value={activeTabValue} className="mt-4 sm:mt-6">
+            {activeTabValue === "my-reviews" ? (
+              <MyReviewsTab userId={userId} initialReviews={initialReviews} />
+            ) : (
+              <div className="space-y-2 sm:space-y-4">
+                {[...Array(3)].map((_, i) => (
+                  <BorrowSkeleton key={`sk-${i}`} variant="profile" />
+                ))}
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
+      </div>
+    );
+  }
+
+  // Unexpected fetch failures only (PENDING/REJECTED never reach here)
+  if (isError && (!initialBorrowHistory || initialBorrowHistory.length === 0)) {
+    return (
+      <div className="w-full">
+        <div className="empty-panel profile-borrow-row" role="status">
+          <p className="mb-2 text-base font-medium text-red-500 sm:text-lg">
+            Failed to load borrow records
+          </p>
+          <p className="text-xs text-light-200 sm:text-sm">
+            {error instanceof Error
+              ? error.message
+              : "An unknown error occurred"}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const formatDate = (date: Date | string | null) =>
+    formatBorrowDate(date) ?? "N/A";
+  const formatLocalClock = (date: Date | string | null | undefined) => {
+    if (!date) return null;
+    const text = formatMediumDateTime(date);
+    return text === "—" ? null : text;
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case "PENDING":
+        return (
+          <Badge variant="glassPending">
+            <Hourglass className="size-3" />
+            Pending Approval
+          </Badge>
+        );
+      case "BORROWED":
+        return (
+          <Badge variant="glassBorrowed">
+            <BookOpen className="size-3" />
+            Currently Borrowed
+          </Badge>
+        );
+      case "RETURNED":
+        return (
+          <Badge variant="glassReturned">
+            <CheckCircle2 className="size-3" />
+            Book Returned
+          </Badge>
+        );
+      case "CANCELLED":
+        return (
+          <Badge variant="glassCancelled">
+            <Ban className="size-3" />
+            Cancelled
+          </Badge>
+        );
+      default:
+        return <Badge variant="glassMuted">{status}</Badge>;
+    }
+  };
+
+  // CRITICAL: Memoize BorrowCard component to prevent unnecessary re-renders
+  // This prevents flicker when React Query refetches but data hasn't changed
+  const BorrowCard: React.FC<{
+    record: BorrowRecordWithBook;
+    showCountdown?: boolean;
+    isReturning?: boolean;
+    isRenewing?: boolean;
+    isCancelling?: boolean;
+  }> = React.memo(
+    ({
+      record,
+      showCountdown = false,
+      isReturning = false,
+      isRenewing = false,
+      isCancelling = false,
+    }) => {
+      const handleViewDetails = () => {
+        router.push(`/books/${record.book.id}`);
+      };
+
+      const handleOpenCancelPending = () => {
+        if (cancellingRecordId || cancelPendingMutation.isPending) return;
+        setCancelPendingTarget(record);
+      };
+
+      const handleOpenReturn = () => {
+        if (returningRecordId || returnBookMutation.isPending) return;
+        setReturnTarget(record);
+      };
+
+      const handleOpenRenew = () => {
+        if (isRenewPending || renewingRecordId) return;
+        setRenewTarget(record);
+      };
+
+      const daysOverdue = getOverdueDays(
+        record.status,
+        record.dueDate,
+        new Date(),
+      );
+      const isOverdue = daysOverdue > 0;
+      const daysRemaining =
+        record.status === "BORROWED" && !isOverdue
+          ? (getCalendarDaysUntilDue(record.dueDate, new Date()) ?? 0)
+          : 0;
+      const displayFine = getRecordFine(
+        {
+          status: record.status,
+          dueDate: record.dueDate,
+          fineAmount: record.fineAmount,
+          fineStatus: record.fineStatus,
+        },
+        effectiveDailyRate,
+        new Date(),
+        rateHistory,
+      );
+
+      const rowAccent =
+        record.status === "PENDING"
+          ? "profile-borrow-row--pending"
+          : record.status === "RETURNED" || record.status === "CANCELLED"
+            ? "profile-borrow-row--returned"
+            : record.status === "BORROWED" && isOverdue
+              ? "profile-borrow-row--overdue"
+              : record.status === "BORROWED" && daysRemaining <= 2 && !isOverdue
+                ? "profile-borrow-row--borrowed-soon"
+                : record.status === "BORROWED"
+                  ? "profile-borrow-row--borrowed"
+                  : "";
+
+      const approvedAt = formatLocalClock(record.approvedAt);
+      const requestedAt = formatLocalClock(record.borrowDate);
+      const returnedOn = formatLocalClock(record.returnDate);
+      const cancelledOn = formatLocalClock(
+        record.cancelledAt ?? record.updatedAt,
+      );
+      const renewedOn = formatLocalClock(record.renewedAt);
+
+      return (
+        <div role="article" className={cn("profile-borrow-row", rowAccent)}>
+          <div className="p-2.5 text-light-100 sm:p-3">
+            <div className="flex flex-col gap-3 sm:flex-row">
+              {/* Full Height Book Cover */}
+              {/* CRITICAL: Don't use key prop - React.memo in BookCover handles re-render prevention
+                Using key would cause component remount on every data change, causing flicker */}
+              <div className="relative w-full shrink-0 sm:w-48">
+                <BookCover
+                  variant="regular"
+                  coverColor={record.book.coverColor}
+                  coverImage={record.book.coverUrl}
+                  className="h-64 w-full sm:h-full"
+                />
+              </div>
+
+              {/* Main Content */}
+              <div className="min-w-0 flex-1">
+                {/* Header with Status Badge */}
+                <div className="mb-2 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-base font-medium sm:text-xl">
+                      <PrefetchLink
+                        href={`/books/${record.book.id}`}
+                        className="text-light-100 transition-colors hover:text-light-100/70"
+                      >
+                        {record.book.title}
+                      </PrefetchLink>
+                    </h3>
+                    <p className="text-xs sm:text-sm">
+                      <span className="text-light-100/70">by </span>
+                      <span className="text-light-200 sm:text-base">
+                        {record.book.author}
+                      </span>
+                    </p>
+                  </div>
+                  {/* Status Badge in Top Right */}
+                  <div className="w-fit shrink-0 sm:ml-2">
+                    {getStatusBadge(record.status)}
+                  </div>
+                </div>
+
+                {/* Genre and Rating */}
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <Badge variant="glassGenre" className="px-1.5 py-0.5 sm:px-2">
+                    <Library className="size-3" />
+                    {record.book.genre}
+                  </Badge>
+                  <div className="flex items-center gap-1">
+                    <Star className="size-3 fill-current text-yellow-400 sm:size-4" />
+                    <span className="text-xs text-yellow-400 sm:text-sm">
+                      {record.book.rating}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Compact Information — labels muted, values bright for contrast */}
+                <div className="mb-2 flex flex-col gap-2 text-xs sm:flex-row sm:items-center sm:gap-4 sm:text-sm">
+                  <div className="flex items-center gap-1">
+                    <Calendar className="size-3 text-blue-400 sm:size-4" />
+                    <span className="font-medium text-light-200">
+                      Borrowed:
+                    </span>
+                    <span className="text-light-100">
+                      {formatDate(record.borrowDate)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Clock className="size-3 text-purple-400 sm:size-4" />
+                    <span className="font-medium text-light-200">Due:</span>
+                    <span className="text-light-100">
+                      {record.dueDate ? formatDate(record.dueDate) : "Not set"}
+                    </span>
+                  </div>
+                  {record.book.isbn && (
+                    <div className="flex items-center gap-1">
+                      <BookOpen className="size-3 text-green-400 sm:size-4" />
+                      <span className="font-medium text-light-200">ISBN:</span>
+                      <span className="font-mono text-light-100">
+                        {record.book.isbn.slice(-4)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Countdown Timer */}
+                {/* CRITICAL: Don't use key prop - React.memo in CountdownTimer handles re-render prevention
+                  Using key would cause component remount on every data change, causing flicker */}
+                {showCountdown &&
+                  record.status === "BORROWED" &&
+                  record.dueDate && (
+                    <div className="mb-2">
+                      <CountdownTimer
+                        dueDate={record.dueDate}
+                        borrowDate={record.borrowDate}
+                      />
+                    </div>
+                  )}
+
+                {/* Status messages — semantic icons + dated copy */}
+                <div className="mb-2">
+                  {record.status === "PENDING" && (
+                    <div className="flex flex-wrap items-center gap-1.5 rounded bg-yellow-500/10 px-2 py-1 sm:gap-2">
+                      <RotateCwFadingClock className="size-3 shrink-0 text-yellow-400 sm:size-4" />
+                      <span className="text-xs text-yellow-400 sm:text-sm">
+                        Awaiting admin approval
+                        {requestedAt ? ` · requested ${requestedAt}` : ""}
+                      </span>
+                    </div>
+                  )}
+
+                  {record.status === "BORROWED" && record.dueDate && (
+                    <div
+                      className={`flex flex-wrap items-center gap-1.5 rounded px-2 py-1 sm:gap-2 ${
+                        isOverdue
+                          ? "bg-red-500/10"
+                          : daysRemaining <= 2
+                            ? "bg-orange-500/10"
+                            : "bg-blue-500/10"
+                      }`}
+                    >
+                      {isOverdue ? (
+                        <AlertTriangle className="size-3 shrink-0 text-red-400 sm:size-4" />
+                      ) : (
+                        <Timer
+                          className={`size-3 shrink-0 sm:size-4 ${
+                            daysRemaining <= 2
+                              ? "text-orange-400"
+                              : "text-blue-400"
+                          }`}
+                        />
+                      )}
+                      <span
+                        className={`text-xs sm:text-sm ${
+                          isOverdue
+                            ? "text-red-400"
+                            : daysRemaining <= 2
+                              ? "text-orange-400"
+                              : "text-blue-400"
+                        }`}
+                      >
+                        {isOverdue
+                          ? `Overdue · ${daysOverdue} day${daysOverdue === 1 ? "" : "s"} late · was due ${formatDate(record.dueDate)}`
+                          : daysRemaining === 0
+                            ? `Due today · ${formatDate(record.dueDate)}`
+                            : daysRemaining <= 2
+                              ? `Due soon · ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} left · ${formatDate(record.dueDate)}`
+                              : `Due on ${formatDate(record.dueDate)}`}
+                        {approvedAt ? ` · approved ${approvedAt}` : ""}
+                        {renewedOn ? ` · renewed ${renewedOn}` : ""}
+                      </span>
+                    </div>
+                  )}
+
+                  {record.status === "RETURNED" && (
+                    <div className="flex flex-wrap items-center gap-1.5 rounded bg-green-500/10 px-2 py-1 sm:gap-2">
+                      <AlarmClockCheck className="size-3 shrink-0 text-emerald-400 sm:size-4" />
+                      <span className="text-xs text-emerald-400 sm:text-sm">
+                        Successfully returned
+                        {returnedOn ? ` · ${returnedOn}` : ""}
+                      </span>
+                    </div>
+                  )}
+
+                  {record.status === "CANCELLED" && (
+                    <div className="flex flex-wrap items-center gap-1.5 rounded bg-rose-500/10 px-2 py-1 sm:gap-2">
+                      <Ban className="size-3 shrink-0 text-rose-400 sm:size-4" />
+                      <span className="text-xs text-rose-400 sm:text-sm">
+                        Cancelled
+                        {cancelledOn ? ` · ${cancelledOn}` : ""}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Fine and Renewal Info */}
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {record.fineStatus === "WAIVED" ? (
+                    <div className="flex items-center gap-1 rounded bg-slate-500/15 px-1.5 py-0.5 sm:px-2 sm:py-1">
+                      <AlertTriangle className="inline size-3 text-slate-300 sm:size-4" />
+                      <span className="text-xs font-medium text-slate-200 sm:text-sm">
+                        Waived
+                      </span>
+                    </div>
+                  ) : record.fineStatus === "PAID" && displayFine > 0 ? (
+                    <div className="flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 sm:px-2 sm:py-1">
+                      <AlertTriangle className="inline size-3 text-emerald-400 sm:size-4" />
+                      <span className="text-xs font-medium text-emerald-400 sm:text-sm">
+                        Paid ${displayFine.toFixed(2)}
+                      </span>
+                    </div>
+                  ) : displayFine > 0 ? (
+                    <div className="flex items-center gap-1 rounded bg-red-500/10 px-1.5 py-0.5 sm:px-2 sm:py-1">
+                      <AlertTriangle className="inline size-3 text-red-400 sm:size-4" />
+                      <span className="text-xs font-medium text-red-400 sm:text-sm">
+                        ${displayFine.toFixed(2)}
+                      </span>
+                      <span className="text-xs text-red-300/70 sm:text-sm">
+                        {isOverdue ? "overdue fine" : "fine"}
+                      </span>
+                    </div>
+                  ) : null}
+
+                  {record.renewalCount > 0 && (
+                    <div className="flex items-center gap-1 rounded bg-purple-500/10 px-1.5 py-0.5 sm:px-2 sm:py-1">
+                      <RotateCcw className="inline size-3 text-purple-400 sm:size-4" />
+                      <span className="text-xs font-medium text-purple-400 sm:text-sm">
+                        {record.renewalCount}
+                      </span>
+                      <span className="text-xs text-purple-300/70 sm:text-sm">
+                        renewals
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Glass action CTAs — shared btn-ripple via withRippleClick */}
+                <div className="flex flex-wrap gap-2">
+                  {record.status === "BORROWED" && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={withRippleClick(handleOpenReturn, isReturning)}
+                        disabled={isReturning}
+                        className={`profile-action-btn ${
+                          isOverdue
+                            ? "profile-action-btn--return-overdue"
+                            : "profile-action-btn--return"
+                        }`}
+                      >
+                        {isReturning ? (
+                          <Loader2 className="size-3 animate-spin sm:size-4" />
+                        ) : (
+                          <RotateCcw className="size-3 sm:size-4" />
+                        )}
+                        <span>
+                          {isReturning ? "Returning…" : "Return Book"}
+                        </span>
+                      </button>
+                      {!isOverdue ? (
+                        <button
+                          type="button"
+                          onClick={withRippleClick(
+                            handleOpenRenew,
+                            isRenewPending || isRenewing,
+                          )}
+                          disabled={isRenewPending || isRenewing}
+                          className="profile-action-btn profile-action-btn--renew"
+                        >
+                          {isRenewing ? (
+                            <Loader2 className="size-3 animate-spin sm:size-4" />
+                          ) : (
+                            <Sparkles className="size-3 sm:size-4" />
+                          )}
+                          {isRenewing ? "Renewing…" : "Renew Loan"}
+                        </button>
+                      ) : null}
+                    </>
+                  )}
+
+                  {record.status !== "RETURNED" && (
+                    <button
+                      type="button"
+                      onClick={withRippleClick(handleViewDetails)}
+                      className="profile-action-btn profile-action-btn--details"
+                    >
+                      <BookOpenText className="size-3 sm:size-4" />
+                      <span>View Details</span>
+                    </button>
+                  )}
+
+                  {record.status === "PENDING" ? (
+                    <button
+                      type="button"
+                      disabled={isCancelling}
+                      onClick={withRippleClick(handleOpenCancelPending)}
+                      className="profile-action-btn profile-action-btn--cancel-request"
+                    >
+                      {isCancelling ? (
+                        <Loader2 className="size-3 animate-spin sm:size-4" />
+                      ) : (
+                        <X className="size-3 sm:size-4" />
+                      )}
+                      <span>
+                        {isCancelling ? "Cancelling…" : "Cancel Request"}
+                      </span>
+                    </button>
+                  ) : null}
+
+                  {record.status === "RETURNED" && (
+                    <button
+                      type="button"
+                      onClick={withRippleClick(handleViewDetails)}
+                      className="profile-action-btn profile-action-btn--review"
+                    >
+                      <Star className="size-3 sm:size-4" />
+                      <span>Review Book</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    },
+    (prevProps, nextProps) => {
+      // CRITICAL: Custom comparison to prevent re-renders when data hasn't actually changed
+      // React.memo comparison returns TRUE if props are EQUAL (skip re-render)
+      // Returns FALSE if props are DIFFERENT (re-render)
+      // Compare all critical fields that affect rendering
+
+      // Quick reference equality check first (fastest)
+      if (
+        prevProps.record === nextProps.record &&
+        prevProps.showCountdown === nextProps.showCountdown &&
+        prevProps.isReturning === nextProps.isReturning &&
+        prevProps.isRenewing === nextProps.isRenewing &&
+        prevProps.isCancelling === nextProps.isCancelling
+      ) {
+        return true; // Same reference, skip re-render
+      }
+
+      // Deep comparison for critical fields
+      const recordEqual =
+        prevProps.record.id === nextProps.record.id &&
+        prevProps.record.status === nextProps.record.status &&
+        prevProps.record.borrowDate?.getTime() ===
+          nextProps.record.borrowDate?.getTime() &&
+        prevProps.record.dueDate?.getTime() ===
+          nextProps.record.dueDate?.getTime() &&
+        prevProps.record.returnDate?.getTime() ===
+          nextProps.record.returnDate?.getTime() &&
+        toStableBorrowDate(prevProps.record.approvedAt)?.getTime() ===
+          toStableBorrowDate(nextProps.record.approvedAt)?.getTime() &&
+        toStableBorrowDate(prevProps.record.cancelledAt)?.getTime() ===
+          toStableBorrowDate(nextProps.record.cancelledAt)?.getTime() &&
+        toStableBorrowDate(prevProps.record.renewedAt)?.getTime() ===
+          toStableBorrowDate(nextProps.record.renewedAt)?.getTime() &&
+        prevProps.record.updatedAt?.getTime() ===
+          nextProps.record.updatedAt?.getTime() &&
+        prevProps.record.fineAmount === nextProps.record.fineAmount &&
+        prevProps.record.fineStatus === nextProps.record.fineStatus &&
+        prevProps.record.book.id === nextProps.record.book.id &&
+        prevProps.record.book.title === nextProps.record.book.title &&
+        prevProps.record.book.author === nextProps.record.book.author &&
+        prevProps.record.book.coverUrl === nextProps.record.book.coverUrl &&
+        prevProps.record.book.coverColor === nextProps.record.book.coverColor &&
+        prevProps.record.book.genre === nextProps.record.book.genre &&
+        prevProps.record.book.rating === nextProps.record.book.rating;
+
+      // Return true if all props are equal (skip re-render)
+      return (
+        recordEqual &&
+        prevProps.showCountdown === nextProps.showCountdown &&
+        prevProps.isReturning === nextProps.isReturning &&
+        prevProps.isRenewing === nextProps.isRenewing &&
+        prevProps.isCancelling === nextProps.isCancelling
+      );
+    },
+  );
+
+  // Set display name for React DevTools
+  BorrowCard.displayName = "BorrowCard";
+
+  const handleConfirmCancelPending = (e: React.MouseEvent) => {
+    // Prevent Radix AlertDialogAction from auto-closing before mutate settles
+    e.preventDefault();
+    if (!cancelPendingTarget || cancelPendingMutation.isPending) return;
+    const target = cancelPendingTarget;
+    setCancellingRecordId(target.id);
+    cancelPendingMutation.mutate(
+      {
+        recordId: target.id,
+        bookTitle: target.book.title,
+      },
+      {
+        onSettled: () => {
+          setCancellingRecordId(null);
+          setCancelPendingTarget(null);
+        },
+      },
+    );
+  };
+
+  const handleConfirmReturn = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!returnTarget || returnBookMutation.isPending) return;
+    const target = returnTarget;
+    setReturningRecordId(target.id);
+    returnBookMutation.mutate(
+      {
+        recordId: target.id,
+        bookTitle: target.book.title,
+      },
+      {
+        onSettled: () => {
+          setReturningRecordId(null);
+          setReturnTarget(null);
+        },
+      },
+    );
+  };
+
+  const handleConfirmRenew = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!renewTarget || isRenewPending) return;
+    const target = renewTarget;
+    const mutationKey = `borrow:${target.id}`;
+    const mutationGeneration = beginMutation(mutationKey);
+    setRenewingRecordId(target.id);
+    startRenewTransition(async () => {
+      try {
+        const result = await renewBorrowedBook(
+          target.id,
+          crypto.randomUUID(),
+        );
+        if (!isLatestMutation(mutationKey, mutationGeneration)) return;
+        if (!result.success) {
+          showToast.book.renewError(result.error);
+          return;
+        }
+        // Gold: snapshot → invalidate → densify (profile + admin queue dueDate).
+        queryClient.setQueryData<BorrowRecordFull[]>(
+          queryKeys.borrows.user(userId, undefined),
+          (current) =>
+            current?.map((item) =>
+              item.id === target.id
+                ? {
+                    ...item,
+                    dueDate: result.data.dueDate,
+                    renewalCount: result.data.renewalCount,
+                    renewedAt: result.data.renewedAt ?? new Date().toISOString(),
+                  }
+                : item,
+            ),
+        );
+        await commitMutationCache(queryClient, "renewal.write", {
+          snapshot: snapshotBorrowListBaselines,
+          densify: (baselines) => {
+            patchBorrowCachesOnRenewal(
+              queryClient,
+              {
+                recordId: target.id,
+                userId,
+                dueDate: result.data.dueDate,
+                renewalCount: result.data.renewalCount,
+                renewedAt: result.data.renewedAt ?? new Date().toISOString(),
+              },
+              baselines,
+            );
+            densifyActivityLog(queryClient, {
+              actorId: userId,
+              action: "UPDATE",
+              entityType: "borrow",
+              entityId: target.id,
+              details: {
+                status: "RENEWED",
+                bookId: target.bookId,
+                userId,
+                title: target.book.title,
+                dueDate: result.data.dueDate,
+              },
+            });
+          },
+        });
+        showToast.book.renewSuccess(target.book.title, result.data.dueDate);
+      } finally {
+        setRenewingRecordId(null);
+        setRenewTarget(null);
+      }
+    });
+  };
+
+  const isCancelDialogBusy =
+    Boolean(cancelPendingTarget) &&
+    (cancelPendingMutation.isPending ||
+      cancellingRecordId === cancelPendingTarget?.id);
+
+  const isReturnDialogBusy =
+    Boolean(returnTarget) &&
+    (returnBookMutation.isPending || returningRecordId === returnTarget?.id);
+
+  const isRenewDialogBusy =
+    Boolean(renewTarget) &&
+    (isRenewPending || renewingRecordId === renewTarget?.id);
+
+  const renderAlertBookPreview = (record: BorrowRecordWithBook) => (
+    <div className={`flex gap-3 ${GLASS_ALERT.preview}`}>
+      <div className="relative h-24 w-16 shrink-0 overflow-hidden rounded sm:h-28 sm:w-20">
+        <BookCover
+          variant="small"
+          coverColor={record.book.coverColor}
+          coverImage={record.book.coverUrl}
+          className="size-full"
+        />
+      </div>
+      <div className="min-w-0 flex-1 space-y-2">
+        <div>
+          <p className="line-clamp-2 text-sm font-medium text-light-100">
+            {record.book.title}
+          </p>
+          <p className="mt-1 text-xs text-light-200">by {record.book.author}</p>
+          {(record.book.genre || record.book.rating != null) && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {record.book.genre ? (
+                <Badge variant="glassGenre" className="px-1.5 py-0.5 sm:px-2">
+                  <Library className="size-3" />
+                  {record.book.genre}
+                </Badge>
+              ) : null}
+              {record.book.rating != null ? (
+                <div className="flex items-center gap-1">
+                  <Star className="size-3 fill-current text-yellow-400 sm:size-4" />
+                  <span className="text-xs text-yellow-400 sm:text-sm">
+                    {record.book.rating}
+                  </span>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+        <BorrowStatusBadge status={record.status} variant="dark" />
+        <BorrowLifecycleDates
+          status={record.status}
+          createdAt={record.createdAt}
+          borrowDate={record.borrowDate}
+          updatedAt={record.updatedAt}
+          approvedAt={record.approvedAt}
+          cancelledAt={record.cancelledAt}
+          renewedAt={record.renewedAt}
+          dueDate={record.dueDate}
+          returnDate={record.returnDate}
+          variant="dark"
+          className="mt-0"
+        />
+      </div>
+    </div>
+  );
+
+  const kpiItems: Array<{
+    key: string;
+    title: string;
+    hint: string;
+    value: string | number;
+    icon: React.ReactNode;
+    tone: string;
+  }> = [
+    {
+      key: "total",
+      title: "Total Borrows",
+      hint: "All requests ever placed",
+      value: borrowStats.totalBorrows,
+      icon: <Layers className="size-4 shrink-0" />,
+      tone: "from-slate-500/25 via-slate-500/10 to-slate-500/5 border-slate-400/30 text-slate-100 shadow-[0_10px_30px_rgba(148,163,184,0.15)]",
+    },
+    {
+      key: "pending",
+      title: "Pending",
+      hint: "Awaiting admin approval",
+      value: borrowStats.pending,
+      icon: <Hourglass className="size-4 shrink-0" />,
+      tone: "from-amber-500/25 via-amber-500/10 to-amber-500/5 border-amber-400/30 text-amber-100 shadow-[0_10px_30px_rgba(245,158,11,0.2)]",
+    },
+    {
+      key: "active",
+      title: "Active Loans",
+      hint: "Checked out right now",
+      value: borrowStats.active,
+      icon: <BookMarked className="size-4 shrink-0" />,
+      tone: "from-blue-500/25 via-blue-500/10 to-blue-500/5 border-blue-400/30 text-blue-100 shadow-[0_10px_30px_rgba(59,130,246,0.2)]",
+    },
+    {
+      key: "holds",
+      title: "Active Holds",
+      hint: "Waiting or ready reservations",
+      value: activeHoldsCount,
+      icon: <Bookmark className="size-4 shrink-0" />,
+      tone: "from-fuchsia-500/25 via-fuchsia-500/10 to-fuchsia-500/5 border-fuchsia-400/30 text-fuchsia-100 shadow-[0_10px_30px_rgba(217,70,239,0.2)]",
+    },
+    {
+      key: "returned",
+      title: "Returned",
+      hint: "Successfully checked in",
+      value: borrowStats.returned,
+      icon: <CheckCircle2 className="size-4 shrink-0" />,
+      tone: "from-emerald-500/25 via-emerald-500/10 to-emerald-500/5 border-emerald-400/30 text-emerald-100 shadow-[0_10px_30px_rgba(16,185,129,0.2)]",
+    },
+    {
+      key: "cancelled",
+      title: "Cancelled",
+      hint: "Soft-cancelled borrow requests",
+      value: borrowStats.cancelled,
+      icon: <Ban className="size-4 shrink-0" />,
+      tone: "from-slate-500/30 via-rose-500/10 to-slate-500/5 border-slate-400/40 text-slate-100 shadow-[0_10px_30px_rgba(148,163,184,0.25)]",
+    },
+    {
+      key: "overdue",
+      title: "Overdue Now",
+      hint: "Past due — return ASAP",
+      value: borrowStats.overdueNow,
+      icon: <AlertTriangle className="size-4 shrink-0" />,
+      tone: "from-red-500/25 via-red-500/10 to-red-500/5 border-red-400/30 text-red-100 shadow-[0_10px_30px_rgba(239,68,68,0.2)]",
+    },
+    {
+      key: "dueSoon",
+      title: "Due in 48h",
+      hint: formatDueSoonHint(
+        borrowStats.dueSoonTitles,
+        borrowStats.dueSoonLeadRemaining,
+      ),
+      value: borrowStats.dueSoon,
+      icon: <Timer className="size-4 shrink-0" />,
+      tone: "from-orange-500/25 via-orange-500/10 to-orange-500/5 border-orange-400/30 text-orange-100 shadow-[0_10px_30px_rgba(249,115,22,0.2)]",
+    },
+    {
+      key: "withFines",
+      title: "With Fines",
+      hint: "Loans carrying a balance",
+      value: borrowStats.withFines,
+      icon: <BadgeDollarSign className="size-4 shrink-0" />,
+      tone: "from-rose-500/25 via-rose-500/10 to-rose-500/5 border-rose-400/30 text-rose-100 shadow-[0_10px_30px_rgba(244,63,94,0.2)]",
+    },
+    {
+      key: "totalFines",
+      title: "Total Fines",
+      hint: "Sum of accrued fines",
+      value: `$${borrowStats.totalFines.toFixed(2)}`,
+      icon: <BadgeDollarSign className="size-4 shrink-0" />,
+      tone: "from-rose-500/25 via-rose-500/10 to-rose-500/5 border-rose-400/30 text-rose-100 shadow-[0_10px_30px_rgba(244,63,94,0.2)]",
+    },
+    {
+      key: "renewals",
+      title: "Total Renewals",
+      hint: "Extensions across loans",
+      value: borrowStats.totalRenewals,
+      icon: <RefreshCw className="size-4 shrink-0" />,
+      tone: "from-violet-500/25 via-violet-500/10 to-violet-500/5 border-violet-400/30 text-violet-100 shadow-[0_10px_30px_rgba(139,92,246,0.2)]",
+    },
+    {
+      key: "avgRenew",
+      title: "Avg Renewals",
+      hint: "Per borrow request",
+      value: borrowStats.avgRenewalsPerLoan,
+      icon: <Sparkles className="size-4 shrink-0" />,
+      tone: "from-purple-500/25 via-purple-500/10 to-purple-500/5 border-purple-400/30 text-purple-100 shadow-[0_10px_30px_rgba(168,85,247,0.2)]",
+    },
+    {
+      key: "unique",
+      title: "Unique Books",
+      hint: "Distinct titles borrowed",
+      value: borrowStats.uniqueBooks,
+      icon: <Library className="size-4 shrink-0" />,
+      tone: "from-cyan-500/25 via-cyan-500/10 to-cyan-500/5 border-cyan-400/30 text-cyan-100 shadow-[0_10px_30px_rgba(6,182,212,0.2)]",
+    },
+    {
+      key: "reviews",
+      title: "Reviews Written",
+      hint: "Your published ratings",
+      value: borrowStats.totalReviews,
+      icon: <MessageSquareText className="size-4 shrink-0" />,
+      tone: "from-indigo-500/25 via-indigo-500/10 to-indigo-500/5 border-indigo-400/30 text-indigo-100 shadow-[0_10px_30px_rgba(99,102,241,0.2)]",
+    },
+    {
+      key: "onTime",
+      title: "On-time Returns",
+      hint: "Returned by due date",
+      value: borrowStats.onTimeReturns,
+      icon: <CalendarCheck2 className="size-4 shrink-0" />,
+      tone: "from-teal-500/25 via-teal-500/10 to-teal-500/5 border-teal-400/30 text-teal-100 shadow-[0_10px_30px_rgba(20,184,166,0.2)]",
+    },
+    {
+      key: "late",
+      title: "Late Returns",
+      hint: "Returned after due date",
+      value: borrowStats.lateReturns,
+      icon: <CalendarClock className="size-4 shrink-0" />,
+      tone: "from-red-500/20 via-red-500/10 to-red-500/5 border-red-400/25 text-red-100 shadow-[0_10px_30px_rgba(239,68,68,0.15)]",
+    },
+    {
+      key: "month",
+      title: "Returned This Month",
+      hint: "Check-ins in UTC month",
+      value: borrowStats.returnedThisMonth,
+      icon: <History className="size-4 shrink-0" />,
+      tone: "from-sky-500/25 via-sky-500/10 to-sky-500/5 border-sky-400/30 text-sky-100 shadow-[0_10px_30px_rgba(14,165,233,0.2)]",
+    },
+    {
+      key: "wait",
+      title: "Oldest Pending",
+      hint: "Days waiting on approval",
+      value: borrowStats.pendingOldestWaitDays,
+      icon: <Clock className="size-4 shrink-0" />,
+      tone: "from-yellow-500/25 via-yellow-500/10 to-yellow-500/5 border-yellow-400/30 text-yellow-100 shadow-[0_10px_30px_rgba(234,179,8,0.2)]",
+    },
+  ];
+
+  const sectionMeta: Record<
+    ProfileTab,
+    { title: string; subtitle: string; icon: React.ReactNode }
+  > = {
+    "active-borrows": {
+      title: "Active loans",
+      subtitle: "Books currently checked out to you",
+      icon: <BookOpen className="size-5 text-blue-300" />,
+    },
+    "pending-requests": {
+      title: "Pending requests",
+      subtitle: "Awaiting librarian approval before checkout",
+      icon: <Hourglass className="size-5 text-amber-300" />,
+    },
+    holds: {
+      title: "Active holds",
+      subtitle: "Active reservations waiting in queue or ready to claim",
+      icon: <Bookmark className="size-5 text-fuchsia-300" />,
+    },
+    "borrow-history": {
+      title: "Borrow history",
+      subtitle: "Completed returns and past loans",
+      icon: <History className="size-5 text-violet-300" />,
+    },
+    "my-reviews": {
+      title: "My reviews",
+      subtitle: "Every review you've submitted, including pending moderation",
+      icon: <MessageSquareText className="size-5 text-indigo-300" />,
+    },
+  };
+
+  return (
+    <div className="w-full">
+      {/* Match All Books hero: title + light-200 subtitle, single mb stack */}
+      <div className="mb-4 sm:mb-6">
+        <h1 className="text-xl font-medium text-light-100 sm:text-3xl">
+          My Borrowing History
+        </h1>
+        <p className="text-sm text-light-200 sm:text-base">
+          Track active loans, pending requests, and your full borrow history
+        </p>
+      </div>
+
+      {/* KPIs above tabs — live from RQ borrows + SSR reviews (review.write → /my-profile) */}
+      <section className="profile-stats-panel mb-4 sm:mb-6">
+        <GlassSectionHeader
+          className="mb-3 sm:mb-4"
+          icon={<BarChart3 className="size-5" />}
+          title="Borrow Statistics"
+          subtitle="Live snapshot of your library activity"
+        />
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-3 md:grid-cols-4">
+          {kpiItems.map((item) => (
+            <div key={item.key} className={`profile-kpi-card ${item.tone}`}>
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="shrink-0 opacity-90">{item.icon}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium leading-tight sm:text-sm">
+                    {item.title}
+                  </p>
+                  <p className="text-[10px] leading-snug opacity-75 sm:text-xs">
+                    {item.hint}
+                  </p>
+                </div>
+              </div>
+              <p className="shrink-0 text-lg font-medium leading-none sm:text-xl">
+                {item.value}
+              </p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <Tabs
+        value={activeTabValue}
+        onValueChange={handleTabChange}
+        className="w-full"
+        suppressHydrationWarning
+      >
+        {/* Standalone glass pills — no outer muted/white track */}
+        <TabsList className="profile-tabs-list mb-4 sm:mb-6">
+          <TabsTrigger
+            value="active-borrows"
+            className="profile-tab-trigger profile-tab-active-borrows"
+          >
+            <BookOpen className="size-4 shrink-0" />
+            <span>Active Borrows ({activeBorrows.length})</span>
+          </TabsTrigger>
+          <TabsTrigger
+            value="pending-requests"
+            className="profile-tab-trigger profile-tab-pending"
+          >
+            <Hourglass className="size-4 shrink-0" />
+            <span>Pending Requests ({pendingRequests.length})</span>
+          </TabsTrigger>
+          <TabsTrigger
+            value="holds"
+            className="profile-tab-trigger profile-tab-holds"
+          >
+            <Bookmark className="size-4 shrink-0" />
+            <span>Active Holds ({activeHoldsCount})</span>
+          </TabsTrigger>
+          <TabsTrigger
+            value="borrow-history"
+            className="profile-tab-trigger profile-tab-history"
+          >
+            <History className="size-4 shrink-0" />
+            <span>Borrow History ({borrowHistory.length})</span>
+          </TabsTrigger>
+          <TabsTrigger
+            value="my-reviews"
+            className="profile-tab-trigger profile-tab-reviews"
+          >
+            <MessageSquareText className="size-4 shrink-0" />
+            <span>My Reviews ({liveTotalReviews})</span>
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="active-borrows" className="mt-0">
+          <div className="space-y-2 sm:space-y-4">
+            <GlassSectionHeader
+              className="flex-wrap gap-y-2"
+              icon={sectionMeta["active-borrows"].icon}
+              title={sectionMeta["active-borrows"].title}
+              subtitle={sectionMeta["active-borrows"].subtitle}
+              trailing={
+                <ProfileTabFilterBar
+                  period={listPeriod}
+                  onPeriodChange={setListPeriod}
+                  status={activeStatusFilter}
+                  onStatusChange={(v) =>
+                    setActiveStatusFilter(v as ActiveBorrowStatusFilter)
+                  }
+                  statusOptions={ACTIVE_STATUS_OPTIONS}
+                  statusLabel="Status"
+                />
+              }
+            />
+            <ProfileActiveFilterChips
+              period={listPeriod}
+              onClearPeriod={() => setListPeriod("all")}
+              status={activeStatusFilter}
+              onClearStatus={() => setActiveStatusFilter("all")}
+              statusOptions={ACTIVE_STATUS_OPTIONS}
+              onReset={clearProfileListFilters}
+            />
+            {activeBorrows.length === 0 ? (
+              <div
+                role="status"
+                className="profile-borrow-row p-4 text-center sm:p-6"
+              >
+                <p className="text-sm text-light-200 sm:text-base">
+                  No active borrows
+                </p>
+              </div>
+            ) : filteredActiveBorrows.length === 0 ? (
+              <ProfileFilterEmptyState
+                message="No active borrows found matching your filters."
+                onClear={clearProfileListFilters}
+              />
+            ) : (
+              filteredActiveBorrows.map((record) => (
+                <BorrowCard
+                  key={record.id}
+                  record={record}
+                  showCountdown={true}
+                  isReturning={returningRecordId === record.id}
+                  isRenewing={renewingRecordId === record.id}
+                />
+              ))
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="pending-requests" className="mt-0">
+          <div className="space-y-2 sm:space-y-4">
+            <GlassSectionHeader
+              className="flex-wrap gap-y-2"
+              icon={sectionMeta["pending-requests"].icon}
+              title={sectionMeta["pending-requests"].title}
+              subtitle={sectionMeta["pending-requests"].subtitle}
+              trailing={
+                <ProfileTabFilterBar
+                  period={listPeriod}
+                  onPeriodChange={setListPeriod}
+                />
+              }
+            />
+            <ProfileActiveFilterChips
+              period={listPeriod}
+              onClearPeriod={() => setListPeriod("all")}
+              onReset={clearProfileListFilters}
+            />
+            {pendingRequests.length === 0 ? (
+              <div
+                role="status"
+                className="profile-borrow-row p-4 text-center sm:p-6"
+              >
+                <p className="text-sm text-light-200 sm:text-base">
+                  No pending requests
+                </p>
+              </div>
+            ) : filteredPendingRequests.length === 0 ? (
+              <ProfileFilterEmptyState
+                message="No pending requests found matching your filters."
+                onClear={clearProfileListFilters}
+              />
+            ) : (
+              filteredPendingRequests.map((record) => (
+                <BorrowCard
+                  key={record.id}
+                  record={record}
+                  isCancelling={cancellingRecordId === record.id}
+                />
+              ))
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="holds" className="mt-0">
+          <div className="space-y-2 sm:space-y-4">
+            <GlassSectionHeader
+              icon={sectionMeta.holds.icon}
+              title={sectionMeta.holds.title}
+              subtitle={sectionMeta.holds.subtitle}
+            />
+            <ReservationsPanel
+              embedded
+              userId={userId}
+              initialReservations={initialReservations}
+              clockMs={holdsClock}
+            />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="borrow-history" className="mt-0">
+          <div className="space-y-2 sm:space-y-4">
+            <GlassSectionHeader
+              className="flex-wrap gap-y-2"
+              icon={sectionMeta["borrow-history"].icon}
+              title={sectionMeta["borrow-history"].title}
+              subtitle={sectionMeta["borrow-history"].subtitle}
+              trailing={
+                <ProfileTabFilterBar
+                  period={listPeriod}
+                  onPeriodChange={setListPeriod}
+                  status={historyStatusFilter}
+                  onStatusChange={(v) =>
+                    setHistoryStatusFilter(v as BorrowHistoryStatusFilter)
+                  }
+                  statusOptions={HISTORY_STATUS_OPTIONS}
+                  statusLabel="Status"
+                />
+              }
+            />
+            <ProfileActiveFilterChips
+              period={listPeriod}
+              onClearPeriod={() => setListPeriod("all")}
+              status={historyStatusFilter}
+              onClearStatus={() => setHistoryStatusFilter("all")}
+              statusOptions={HISTORY_STATUS_OPTIONS}
+              onReset={clearProfileListFilters}
+            />
+            {sortedHistory.length === 0 ? (
+              <div
+                role="status"
+                className="profile-borrow-row p-4 text-center sm:p-6"
+              >
+                <p className="text-sm text-light-200 sm:text-base">
+                  No borrow history
+                </p>
+              </div>
+            ) : filteredHistory.length === 0 ? (
+              <ProfileFilterEmptyState
+                message="No borrow history found matching your filters."
+                onClear={clearProfileListFilters}
+              />
+            ) : (
+              filteredHistory.map((record) => (
+                <BorrowCard key={record.id} record={record} />
+              ))
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="my-reviews" className="mt-0">
+          <div className="space-y-2 sm:space-y-4">
+            <GlassSectionHeader
+              className="flex-wrap gap-y-2"
+              icon={sectionMeta["my-reviews"].icon}
+              title={sectionMeta["my-reviews"].title}
+              subtitle={sectionMeta["my-reviews"].subtitle}
+              trailing={
+                <ProfileTabFilterBar
+                  period={listPeriod}
+                  onPeriodChange={setListPeriod}
+                  status={reviewStatusFilter}
+                  onStatusChange={(v) =>
+                    setReviewStatusFilter(v as ReviewStatusFilter)
+                  }
+                  statusOptions={REVIEW_STATUS_OPTIONS}
+                  statusLabel="Status"
+                />
+              }
+            />
+            <ProfileActiveFilterChips
+              period={listPeriod}
+              onClearPeriod={() => setListPeriod("all")}
+              status={reviewStatusFilter}
+              onClearStatus={() => setReviewStatusFilter("all")}
+              statusOptions={REVIEW_STATUS_OPTIONS}
+              onReset={clearProfileListFilters}
+            />
+            <MyReviewsTab
+              userId={userId}
+              initialReviews={initialReviews}
+              period={listPeriod}
+              statusFilter={reviewStatusFilter}
+              onClearFilters={clearProfileListFilters}
+            />
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      <AlertDialog
+        open={cancelPendingTarget != null}
+        onOpenChange={(open) => {
+          if (isCancelDialogBusy) return;
+          if (!open) setCancelPendingTarget(null);
+        }}
+      >
+        <AlertDialogContent className={GLASS_ALERT.content}>
+          <AlertDialogHeader>
+            <AlertDialogTitle className={GLASS_ALERT.title}>
+              Cancel borrow request?
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className={`space-y-2 ${GLASS_ALERT.description}`}>
+                <p>
+                  Withdraw your pending request for this book. You can request
+                  it again later if copies are available.
+                </p>
+                {cancelPendingTarget
+                  ? renderAlertBookPreview(cancelPendingTarget)
+                  : null}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className={GLASS_ALERT.footer}>
+            <AlertDialogCancel
+              disabled={isCancelDialogBusy}
+              className={GLASS_ALERT.cancel}
+            >
+              Keep request
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmCancelPending}
+              disabled={isCancelDialogBusy}
+              className={GLASS_ALERT.destructive}
+            >
+              {isCancelDialogBusy ? (
+                <Loader2 className="size-3.5 animate-spin sm:size-4" />
+              ) : (
+                <X className="size-3.5 sm:size-4" />
+              )}
+              {isCancelDialogBusy ? "Cancelling…" : "Cancel Request"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={returnTarget != null}
+        onOpenChange={(open) => {
+          if (isReturnDialogBusy) return;
+          if (!open) setReturnTarget(null);
+        }}
+      >
+        <AlertDialogContent className={GLASS_ALERT.content}>
+          <AlertDialogHeader>
+            <AlertDialogTitle className={GLASS_ALERT.title}>
+              Return this book?
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className={`space-y-2 ${GLASS_ALERT.description}`}>
+                <p>
+                  Mark this loan as returned. The copy will go back into
+                  circulation (or the next hold in queue).
+                </p>
+                {returnTarget ? renderAlertBookPreview(returnTarget) : null}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className={GLASS_ALERT.footer}>
+            <AlertDialogCancel
+              disabled={isReturnDialogBusy}
+              className={GLASS_ALERT.cancel}
+            >
+              Keep borrowed
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmReturn}
+              disabled={isReturnDialogBusy}
+              className={GLASS_ALERT.destructive}
+            >
+              {isReturnDialogBusy ? (
+                <Loader2 className="size-3.5 animate-spin sm:size-4" />
+              ) : (
+                <RotateCcw className="size-3.5 sm:size-4" />
+              )}
+              {isReturnDialogBusy ? "Returning…" : "Return Book"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={renewTarget != null}
+        onOpenChange={(open) => {
+          if (isRenewDialogBusy) return;
+          if (!open) setRenewTarget(null);
+        }}
+      >
+        <AlertDialogContent className={GLASS_ALERT.content}>
+          <AlertDialogHeader>
+            <AlertDialogTitle className={GLASS_ALERT.title}>
+              Renew this loan?
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className={`space-y-2 ${GLASS_ALERT.description}`}>
+                <p>
+                  Extend the due date for this book if renewals are still
+                  available on your account.
+                </p>
+                {renewTarget ? renderAlertBookPreview(renewTarget) : null}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter className={GLASS_ALERT.footer}>
+            <AlertDialogCancel
+              disabled={isRenewDialogBusy}
+              className={GLASS_ALERT.cancel}
+            >
+              Keep due date
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmRenew}
+              disabled={isRenewDialogBusy}
+              className="w-full gap-1.5 bg-violet-600 text-xs text-white hover:bg-violet-700 sm:w-auto sm:text-sm"
+            >
+              {isRenewDialogBusy ? (
+                <Loader2 className="size-3.5 animate-spin sm:size-4" />
+              ) : (
+                <Sparkles className="size-3.5 sm:size-4" />
+              )}
+              {isRenewDialogBusy ? "Renewing…" : "Renew Loan"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+};
+
+export default MyProfileTabs;
