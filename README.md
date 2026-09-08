@@ -1,4 +1,3 @@
-Đây, tôi soạn sẵn cho bạn một mẫu nội dung README.md cực kỳ chuyên nghiệp, chuẩn chỉnh để đưa vào dự án. Nội dung vừa tóm tắt gọn gàng các tính năng xịn sò của hệ thống, vừa thể hiện đúng chất kỹ thuật để thầy đọc vào là ưng cái bụng ngay:
 
 📚 Library Management System (BookWise)
 Hệ thống quản lý thư viện hiện đại được xây dựng theo mô hình Fullstack, tối ưu hóa trải nghiệm mượn trả sách, quản lý người dùng và vận hành bảng điều khiển quản trị (Admin Dashboard).
